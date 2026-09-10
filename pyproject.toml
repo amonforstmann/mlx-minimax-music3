@@ -37,7 +37,7 @@ dependencies = [
 [project.urls]
 Homepage = "https://github.com/appautomaton/mlx-minimax-music3"
 Repository = "https://github.com/appautomaton/mlx-minimax-music3"
-Documentation = "https://appautomaton.renocrypt.com/mlx-minimax-music3/"
+Documentation = "https://appautomaton.com/mlx-minimax-music3/"
 Issues = "https://github.com/appautomaton/mlx-minimax-music3/issues"
 
 [dependency-groups]

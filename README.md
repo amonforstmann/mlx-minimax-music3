@@ -11,7 +11,7 @@
 [![MLX](https://img.shields.io/badge/backend-MLX-7C3AED?style=flat-square)](https://github.com/ml-explore/mlx)
 
 [**PyPI**](https://pypi.org/project/mlx-minimax-music3/) ·
-[**Project site**](https://appautomaton.renocrypt.com/mlx-minimax-music3/)
+[**Project site**](https://appautomaton.com/mlx-minimax-music3/)
 
 </div>
 

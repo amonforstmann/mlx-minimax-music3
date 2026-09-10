@@ -23,8 +23,8 @@ tags:
 
 [![PyPI](https://img.shields.io/pypi/v/mlx-minimax-music3?include_prereleases=true&style=flat-square&logo=pypi&logoColor=white)](https://pypi.org/project/mlx-minimax-music3/)
 [![GitHub](https://img.shields.io/badge/GitHub-mlx--minimax--music3-181717?style=flat-square&logo=github&logoColor=white)](https://github.com/appautomaton/mlx-minimax-music3)
-[![Project page](https://img.shields.io/badge/project-appautomaton.renocrypt.com-F59E0B?style=flat-square)](https://appautomaton.renocrypt.com/mlx-minimax-music3/)
-[![App Automaton](https://img.shields.io/badge/App%20Automaton-project-1f6feb?style=flat-square)](https://appautomaton.renocrypt.com)
+[![Project page](https://img.shields.io/badge/project-appautomaton.com-F59E0B?style=flat-square)](https://appautomaton.com/mlx-minimax-music3/)
+[![App Automaton](https://img.shields.io/badge/App%20Automaton-project-1f6feb?style=flat-square)](https://appautomaton.com)
 [![Hugging Face](https://img.shields.io/badge/%F0%9F%A4%97-MiniMax--Music3--MLX-yellow?style=flat-square)](https://huggingface.co/appautomaton/MiniMax-Music3-MLX)
 
 Precision-preserving MLX-native layout conversion of
@@ -186,4 +186,4 @@ The `mlx-minimax-music3` runtime code is separately licensed under MIT.
 - Source model: [`MiniMaxAI/MiniMax-Music3`](https://huggingface.co/MiniMaxAI/MiniMax-Music3)
 - Runtime source: [`appautomaton/mlx-minimax-music3`](https://github.com/appautomaton/mlx-minimax-music3)
 - Python package: [`mlx-minimax-music3` on PyPI](https://pypi.org/project/mlx-minimax-music3/)
-- Project page: [appautomaton.renocrypt.com/mlx-minimax-music3](https://appautomaton.renocrypt.com/mlx-minimax-music3/)
+- Project page: [appautomaton.com/mlx-minimax-music3](https://appautomaton.com/mlx-minimax-music3/)

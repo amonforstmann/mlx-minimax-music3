@@ -5,7 +5,15 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-from mlx_minimax_music3.acoustic import FlowGenerationConfig, solve_flow_chunk
+from mlx_minimax_music3 import acoustic
+from mlx_minimax_music3.acoustic import (
+    AcousticResumeState,
+    FlowGenerationConfig,
+    LatentChunk,
+    generate_acoustic_latents,
+    solve_flow_chunk,
+)
+from mlx_minimax_music3.chunking import ChunkWindow
 
 
 class ZeroTransformer:
@@ -115,3 +123,47 @@ def test_f16_transformer_keeps_euler_state_in_fp32() -> None:
 def test_flow_config_rejects_non_finite_guidance() -> None:
     with pytest.raises(ValueError, match="finite"):
         FlowGenerationConfig(cfg_scale=float("nan"))
+
+
+def test_generate_acoustic_latents_resumes_prefix_and_publishes_each_new_window(
+    monkeypatch,
+) -> None:
+    first = LatentChunk(
+        ChunkWindow(0, 0, 200, True, False),
+        mx.ones((1, 688, 4), dtype=mx.float32),
+    )
+    resume = AcousticResumeState(
+        chunks=(first,),
+        previous_latent=mx.ones((1, 172, 4), dtype=mx.float32),
+        previous_condition=mx.ones((1, 172, 8), dtype=mx.float32),
+    )
+    solved = []
+
+    def solve(*args, **kwargs):
+        solved.append((kwargs["previous_latent"], kwargs["previous_condition"]))
+        return (
+            mx.full((1, 516, 4), 2.0),
+            mx.full((1, 172, 4), 3.0),
+            mx.full((1, 172, 8), 4.0),
+        )
+
+    monkeypatch.setattr(acoustic, "solve_flow_chunk", solve)
+    completed = []
+    result = generate_acoustic_latents(
+        ZeroTransformer(),
+        lambda values: mx.zeros((1, values.shape[1], 8)),
+        mx.zeros((1, 250, 16)),
+        seed=9,
+        config=FlowGenerationConfig(num_steps=2),
+        resume=resume,
+        window_completed=completed.append,
+    )
+
+    assert len(solved) == 1
+    assert solved[0][0] is resume.previous_latent
+    assert solved[0][1] is resume.previous_condition
+    assert result.chunks[0] is first
+    assert len(result.chunks) == 2
+    assert len(completed) == 1
+    assert completed[0].chunk == result.chunks[1]
+    assert completed[0].next_latent.shape == (1, 172, 4)

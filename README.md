@@ -91,11 +91,18 @@ result = pipeline.generate(
         seed=0,
     ),
     output="outputs/song.wav",
+    generation_checkpoint_dir="outputs/checkpoints",
 )
 
 print(result.metadata.checkpoint_profile)
 print(result.metadata.memory_reports)
 ```
+
+`generation_checkpoint_dir` is optional. When set, the pipeline stores the
+completed autoregressive result and each completed acoustic window under a
+request-and-model fingerprint. Repeating the same request resumes from the last
+validated boundary. Generated checkpoints are disposable cache data. A corrupt
+artifact is recomputed, while model-checkpoint validation remains a hard error.
 
 `audio_duration` is the generation ceiling because the model may emit its audio
 end token sooner. Set `min_audio_duration` to suppress early stopping until a
@@ -173,11 +180,7 @@ for the design.
 git clone https://github.com/appautomaton/mlx-minimax-music3.git
 cd mlx-minimax-music3
 uv sync --locked
-uv run ruff check .
-uv run pytest -q tests/unit
-uv run pytest -q tests/integration
-uv run python dev/check_public_tree.py
-uv build --no-sources
+make check
 ```
 
 Unit tests and weightless integration tests are separate default gates. Every

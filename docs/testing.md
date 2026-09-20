@@ -23,6 +23,13 @@ them as separate steps for clear failure attribution without running any test
 twice. The workflow runs automatically for pull requests and pushes to `main`,
 and it can also be started manually.
 
+`make check` is the local release gate. It runs Ruff, both pytest tiers, the
+public-tree validator, and a source-only package build in that order.
+
+Generation-checkpoint tests use temporary directories and synthetic MLX arrays.
+They cover atomic round trips, corruption fallback, acoustic-prefix resume,
+restored progress, stage timing, and model-load omission without model weights.
+
 The golden integration fixture is versioned in
 `tests/fixtures/music3_golden_v1.json`. It persists the miniature model contract,
 inference inputs, expected numerical outputs, topology digests, and tolerances.

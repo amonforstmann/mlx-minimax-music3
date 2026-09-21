@@ -13,6 +13,8 @@ import mlx.core as mx
 
 from .acoustic import (
     AcousticLatents,
+    AcousticResumeState,
+    CompletedAcousticWindow,
     FlowGenerationConfig,
     FlowProgress,
     generate_acoustic_latents,
@@ -24,7 +26,9 @@ from .autoregressive import (
     GenerationProgress,
     generate_autoregressive,
 )
+from .chunking import chunk_windows
 from .decoding import Waveform, decode_latent_chunks
+from .generation_checkpoint import GenerationCheckpointStore
 from .loading import (
     load_condition_encoder,
     load_flow_transformer,
@@ -230,6 +234,8 @@ def _run_acoustic_stage(
     include_footprint: bool,
     progress: Callable[[FlowProgress], None] | None,
     cancelled: Callable[[], bool] | None,
+    resume: AcousticResumeState | None = None,
+    window_completed: Callable[[CompletedAcousticWindow], None] | None = None,
 ) -> tuple[AcousticLatents, StageMemoryReport]:
     session = StageSession(
         "acoustic",
@@ -246,6 +252,8 @@ def _run_acoustic_stage(
             config=config,
             progress=progress,
             cancelled=cancelled,
+            resume=resume,
+            window_completed=window_completed,
         )
         session.handoff(*(chunk.latents for chunk in result.chunks))
     if session.report is None:
@@ -296,45 +304,116 @@ def _generate(
     flow_progress: Callable[[FlowProgress], None] | None = None,
     decode_progress: Callable[[int, int], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    generation_checkpoint_dir: str | Path | None = None,
 ) -> GenerationResult:
     """Execute one request without retaining model weights between stages."""
 
-    prompt = tokenizer.encode_prompt(request.caption, request.lyrics)
     timings = []
     reports = []
     autoregressive_config = request.autoregressive_config
+    checkpoint_store = None
+    restored = None
+    if generation_checkpoint_dir is not None:
+        checkpoint_store = GenerationCheckpointStore(
+            generation_checkpoint_dir,
+            request=request,
+            flow_compute_dtype=flow_compute_dtype,
+            model_manifest=manifest,
+        )
+        restored = checkpoint_store.restore(
+            autoregressive_config=autoregressive_config
+        )
 
-    started = time.perf_counter()
-    autoregressive, report = _run_autoregressive_stage(
-        checkpoint,
-        prompt,
-        autoregressive_config,
-        policy=memory_policy,
-        include_footprint=include_footprint,
-        progress=autoregressive_progress,
-        cancelled=cancelled,
-    )
-    timings.append(StageTiming("autoregressive", time.perf_counter() - started))
-    reports.append(report)
+    if restored is not None and restored.autoregressive is not None:
+        autoregressive = restored.autoregressive
+        timings.append(StageTiming("autoregressive", 0.0))
+        if autoregressive_progress is not None:
+            autoregressive_progress(
+                GenerationProgress(
+                    completed_frames=autoregressive.num_frames,
+                    maximum_frames=autoregressive_config.max_frames,
+                )
+            )
+    else:
+        prompt = tokenizer.encode_prompt(request.caption, request.lyrics)
+        started = time.perf_counter()
+        autoregressive, report = _run_autoregressive_stage(
+            checkpoint,
+            prompt,
+            autoregressive_config,
+            policy=memory_policy,
+            include_footprint=include_footprint,
+            progress=autoregressive_progress,
+            cancelled=cancelled,
+        )
+        timings.append(
+            StageTiming("autoregressive", time.perf_counter() - started)
+        )
+        reports.append(report)
+        if checkpoint_store is not None:
+            checkpoint_store.save_autoregressive(autoregressive)
+        del prompt
     frame_count = autoregressive.num_frames
     stopped_on_audio_end = autoregressive.stopped_on_audio_end
     frame_hiddens = autoregressive.frame_hiddens
-    del autoregressive, prompt
+    del autoregressive
 
-    started = time.perf_counter()
-    acoustic, report = _run_acoustic_stage(
-        checkpoint,
-        frame_hiddens,
-        seed=request.seed,
-        config=request.flow_config,
-        flow_compute_dtype=flow_compute_dtype,
-        policy=memory_policy,
-        include_footprint=include_footprint,
-        progress=flow_progress,
-        cancelled=cancelled,
-    )
-    timings.append(StageTiming("acoustic", time.perf_counter() - started))
-    reports.append(report)
+    acoustic_resume = restored.acoustic if restored is not None else None
+    if acoustic_resume is not None and flow_progress is not None:
+        for chunk in acoustic_resume.chunks:
+            flow_progress(
+                FlowProgress(
+                    chunk_index=chunk.window.index,
+                    num_chunks=len(chunk_windows(frame_count)),
+                    step=request.flow_config.num_steps,
+                    num_steps=request.flow_config.num_steps,
+                )
+            )
+    expected_chunks = len(chunk_windows(frame_count))
+    if (
+        acoustic_resume is not None
+        and len(acoustic_resume.chunks) == expected_chunks
+    ):
+        acoustic = AcousticLatents(chunks=acoustic_resume.chunks)
+        timings.append(StageTiming("acoustic", 0.0))
+    else:
+        started = time.perf_counter()
+        if checkpoint_store is None:
+            acoustic, report = _run_acoustic_stage(
+                checkpoint,
+                frame_hiddens,
+                seed=request.seed,
+                config=request.flow_config,
+                flow_compute_dtype=flow_compute_dtype,
+                policy=memory_policy,
+                include_footprint=include_footprint,
+                progress=flow_progress,
+                cancelled=cancelled,
+            )
+        else:
+
+            def save_window(completed: CompletedAcousticWindow) -> None:
+                checkpoint_store.save_acoustic_window(
+                    completed.chunk,
+                    next_latent=completed.next_latent,
+                    next_condition=completed.next_condition,
+                )
+
+            acoustic, report = _run_acoustic_stage(
+                checkpoint,
+                frame_hiddens,
+                seed=request.seed,
+                config=request.flow_config,
+                flow_compute_dtype=flow_compute_dtype,
+                policy=memory_policy,
+                include_footprint=include_footprint,
+                progress=flow_progress,
+                cancelled=cancelled,
+                resume=acoustic_resume,
+                window_completed=save_window,
+            )
+        timings.append(StageTiming("acoustic", time.perf_counter() - started))
+        reports.append(report)
     chunk_count = acoustic.num_chunks
     del frame_hiddens
 
@@ -454,6 +533,7 @@ class Music3Pipeline:
         flow_progress: Callable[[FlowProgress], None] | None = None,
         decode_progress: Callable[[int, int], None] | None = None,
         cancelled: Callable[[], bool] | None = None,
+        generation_checkpoint_dir: str | Path | None = None,
     ) -> GenerationResult:
         """Generate native 44.1 kHz stereo audio for one request."""
 
@@ -474,6 +554,7 @@ class Music3Pipeline:
                 flow_progress=flow_progress,
                 decode_progress=decode_progress,
                 cancelled=cancelled,
+                generation_checkpoint_dir=generation_checkpoint_dir,
             )
 
 
@@ -491,6 +572,7 @@ def _run_pipeline(
     flow_progress: Callable[[FlowProgress], None] | None = None,
     decode_progress: Callable[[int, int], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    generation_checkpoint_dir: str | Path | None = None,
 ) -> GenerationResult:
     """Construct a one-shot pipeline and generate one result."""
 
@@ -509,6 +591,7 @@ def _run_pipeline(
         flow_progress=flow_progress,
         decode_progress=decode_progress,
         cancelled=cancelled,
+        generation_checkpoint_dir=generation_checkpoint_dir,
     )
 
 

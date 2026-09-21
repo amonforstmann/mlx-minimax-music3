@@ -85,6 +85,17 @@ model component:
 | Decode | Vocoder | Cropped waveform chunks |
 | Output | None | Final WAV and generation metadata |
 
+Callers may provide a generation-checkpoint directory. The pipeline fingerprints
+the full request, runtime flow dtype, and model manifest identity. It stores the
+evaluated autoregressive handoff and each acoustic window with hashes and tensor
+metadata. Restore validates the autoregressive artifact as one unit and the
+acoustic windows as a prefix. A bad autoregressive artifact invalidates the
+generated cache. A missing or bad acoustic artifact truncates only that prefix.
+Decode always reruns from the assembled latent chunks.
+
+The generated cache is separate from model weights. Cache corruption causes
+recomputation. Model-manifest or model-weight corruption remains a hard error.
+
 Every weight-owning stage runs inside an explicit session with this lifecycle:
 
 ```text
@@ -171,3 +182,5 @@ writing, and stage memory reports. Internal codebook tensors,
 framework-specific schedulers, model owners, and checkpoint mappings remain
 private. A `Music3Pipeline` retains only its validated manifest and tokenizer;
 generation is serialized and no model weights survive a completed stage.
+Restored stages skip model loading and report zero elapsed time. Memory reports list
+only stages whose models loaded during the current call.

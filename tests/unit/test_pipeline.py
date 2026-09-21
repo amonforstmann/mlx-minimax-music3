@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import wave
 from pathlib import Path
+from types import SimpleNamespace
 
 import mlx.core as mx
 import pytest
@@ -200,3 +201,115 @@ def test_generation_request_builds_validated_stage_configs() -> None:
     assert request.autoregressive_config.seed == 11
     assert request.autoregressive_config.top_k == 32
     assert request.flow_config.num_steps == 12
+
+
+@pytest.mark.usefixtures("isolated_stage_memory")
+def test_restored_stages_report_defined_metadata_and_progress(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    checkpoint = tmp_path / "model"
+    checkpoint.mkdir()
+    _write_manifest(checkpoint)
+
+    class FakeTokenizer:
+        def encode_prompt(self, caption: str, lyrics: str) -> TokenizedPrompt:
+            return TokenizedPrompt((1, 2), (1, 2))
+
+    monkeypatch.setattr(
+        pipeline.Qwen2BPETokenizer,
+        "from_directory",
+        classmethod(lambda cls, root: FakeTokenizer()),
+    )
+    autoregressive = AutoregressiveResult(
+        codes=mx.zeros((1, 250, 8), dtype=mx.int32),
+        frame_hiddens=mx.zeros((1, 250, 32), dtype=mx.float32),
+        stopped_on_audio_end=True,
+    )
+    windows = (
+        ChunkWindow(0, 0, 200, True, False),
+        ChunkWindow(1, 100, 250, False, True),
+    )
+    acoustic = AcousticLatents(
+        chunks=tuple(
+            LatentChunk(window, mx.full((1, 8, 4), window.index + 1.0))
+            for window in windows
+        )
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "_run_autoregressive_stage",
+        lambda *args, **kwargs: (
+            autoregressive,
+            SimpleNamespace(label="autoregressive"),
+        ),
+    )
+
+    def run_acoustic(*args, **kwargs):
+        publish = kwargs["window_completed"]
+        for chunk in acoustic.chunks:
+            publish(
+                SimpleNamespace(
+                    chunk=chunk,
+                    next_latent=mx.ones((1, 2, 4)),
+                    next_condition=mx.ones((1, 2, 8)),
+                )
+            )
+        return acoustic, SimpleNamespace(label="acoustic")
+
+    monkeypatch.setattr(pipeline, "_run_acoustic_stage", run_acoustic)
+    monkeypatch.setattr(
+        pipeline,
+        "_run_decode_stage",
+        lambda *args, **kwargs: (
+            Waveform(mx.zeros((2, 8)), sample_rate=44_100),
+            SimpleNamespace(label="decode"),
+        ),
+    )
+    request = pipeline.GenerationRequest(
+        caption="caption",
+        lyrics="lyrics",
+        audio_duration=11.0,
+        seed=7,
+    )
+    cache = tmp_path / "checkpoints"
+    pipeline._run_pipeline(
+        checkpoint,
+        request,
+        generation_checkpoint_dir=cache,
+        include_footprint=False,
+    )
+
+    monkeypatch.setattr(
+        pipeline,
+        "_run_autoregressive_stage",
+        lambda *args, **kwargs: pytest.fail("restored AR stage was loaded"),
+    )
+    monkeypatch.setattr(
+        pipeline,
+        "_run_acoustic_stage",
+        lambda *args, **kwargs: pytest.fail("restored acoustic stage was loaded"),
+    )
+    ar_progress = []
+    flow_progress = []
+    result = pipeline._run_pipeline(
+        checkpoint,
+        request,
+        generation_checkpoint_dir=cache,
+        include_footprint=False,
+        autoregressive_progress=ar_progress.append,
+        flow_progress=flow_progress.append,
+    )
+
+    assert result.metadata.frame_count == 250
+    assert result.metadata.chunk_count == 2
+    assert result.metadata.stopped_on_audio_end is True
+    assert [(timing.label, timing.seconds) for timing in result.metadata.stage_timings[:2]] == [
+        ("autoregressive", 0.0),
+        ("acoustic", 0.0),
+    ]
+    assert [report.label for report in result.metadata.memory_reports] == ["decode"]
+    assert ar_progress[-1].completed_frames == 250
+    assert [sample.chunk_index for sample in flow_progress] == [0, 1]
+    assert all(sample.step == request.flow_steps for sample in flow_progress)

@@ -10,7 +10,9 @@ import pytest
 from mlx.utils import tree_flatten
 
 from mlx_minimax_music3.acoustic import FlowGenerationConfig, generate_acoustic_latents
+from mlx_minimax_music3.autoregressive import AutoregressiveResult
 from mlx_minimax_music3.decoding import decode_latent_chunks
+from mlx_minimax_music3.generation_checkpoint import GenerationCheckpointStore
 from mlx_minimax_music3.loading import (
     load_condition_encoder,
     load_flow_transformer,
@@ -19,6 +21,7 @@ from mlx_minimax_music3.loading import (
     load_vocoder,
 )
 from mlx_minimax_music3.manifest import CheckpointManifest
+from mlx_minimax_music3.pipeline import GenerationRequest
 from tests.support.golden_checkpoint import (
     GoldenCheckpoints,
     load_golden_contract,
@@ -151,3 +154,104 @@ def test_golden_checkpoint_detects_inference_regressions(
             abs=tolerances[name],
             rel=0.0,
         )
+
+
+def test_golden_checkpoint_resume_recomputes_only_the_missing_acoustic_suffix(
+    golden_checkpoints: GoldenCheckpoints,
+    tmp_path,
+) -> None:
+    contract = load_golden_contract()
+    generation = cast(dict[str, Any], contract["generation"])
+    checkpoint = golden_checkpoints.dense
+    manifest = CheckpointManifest.read(checkpoint / "manifest.json")
+    language_model = load_language_model(checkpoint)
+    depth_decoder = load_rvq_depth_decoder(checkpoint)
+    language_output = language_model(
+        mx.array([generation["token_ids"]], dtype=mx.int32)
+    )
+    language_last = language_output.last_hidden_state[:, -1]
+    depth_inputs = mx.stack(
+        tuple(
+            language_last * float(scale)
+            for scale in generation["depth_input_scales"]
+        ),
+        axis=1,
+    )
+    depth_hidden = depth_decoder(depth_inputs)[:, -1]
+    one_frame = mx.concatenate(
+        (language_last[:, None, :], depth_hidden[:, None, :]), axis=-1
+    )
+    frame_hiddens = mx.repeat(one_frame, 250, axis=1)
+    request = GenerationRequest(
+        caption="golden",
+        lyrics="golden",
+        audio_duration=10.0,
+        seed=int(generation["flow_seed"]),
+        flow_steps=int(generation["flow_steps"]),
+        flow_cfg_scale=float(generation["cfg_scale"]),
+    )
+    store = GenerationCheckpointStore(
+        tmp_path / "checkpoints",
+        request=request,
+        flow_compute_dtype="float32",
+        model_manifest=manifest,
+    )
+    store.save_autoregressive(
+        AutoregressiveResult(
+            codes=mx.zeros((1, 250, 2), dtype=mx.int32),
+            frame_hiddens=frame_hiddens,
+            stopped_on_audio_end=False,
+        )
+    )
+    flow_config = request.flow_config
+
+    def publish(completed) -> None:
+        store.save_acoustic_window(
+            completed.chunk,
+            next_latent=completed.next_latent,
+            next_condition=completed.next_condition,
+        )
+
+    clean = generate_acoustic_latents(
+        load_flow_transformer(checkpoint),
+        load_condition_encoder(checkpoint),
+        frame_hiddens,
+        seed=request.seed,
+        config=flow_config,
+        window_completed=publish,
+    )
+    (store.directory / "acoustic-0001.safetensors").unlink()
+    restored = GenerationCheckpointStore(
+        tmp_path / "checkpoints",
+        request=request,
+        flow_compute_dtype="float32",
+        model_manifest=manifest,
+    ).restore(autoregressive_config=request.autoregressive_config)
+    assert restored.acoustic is not None
+    assert len(restored.acoustic.chunks) == 1
+
+    completed_windows = []
+
+    def record_completed(completed) -> None:
+        completed_windows.append(completed.chunk.window.index)
+
+    assert restored.autoregressive is not None
+    resumed = generate_acoustic_latents(
+        load_flow_transformer(checkpoint),
+        load_condition_encoder(checkpoint),
+        restored.autoregressive.frame_hiddens,
+        seed=request.seed,
+        config=flow_config,
+        resume=restored.acoustic,
+        window_completed=record_completed,
+    )
+
+    assert completed_windows == [1]
+    assert len(resumed.chunks) == len(clean.chunks) == 2
+    vocoder = load_vocoder(checkpoint)
+    for expected, actual in zip(clean.chunks, resumed.chunks, strict=True):
+        expected_waveform = vocoder(expected.latents)
+        actual_waveform = vocoder(actual.latents)
+        mx.eval(expected.latents, actual.latents, expected_waveform, actual_waveform)
+        assert mx.array_equal(actual.latents, expected.latents).item()
+        assert mx.array_equal(actual_waveform, expected_waveform).item()

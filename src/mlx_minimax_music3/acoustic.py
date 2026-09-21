@@ -65,6 +65,24 @@ class AcousticLatents:
         return len(self.chunks)
 
 
+@dataclass(frozen=True, slots=True)
+class AcousticResumeState:
+    """Validated completed-window prefix and its overlap carry."""
+
+    chunks: tuple[LatentChunk, ...]
+    previous_latent: mx.array | None
+    previous_condition: mx.array | None
+
+
+@dataclass(frozen=True, slots=True)
+class CompletedAcousticWindow:
+    """One durable window and the carry required by its successor."""
+
+    chunk: LatentChunk
+    next_latent: mx.array
+    next_condition: mx.array
+
+
 def solve_flow_chunk(
     transformer: FlowTransformer,
     condition: mx.array,
@@ -164,6 +182,8 @@ def generate_acoustic_latents(
     config: FlowGenerationConfig = DEFAULT_FLOW_CONFIG,
     progress: Callable[[FlowProgress], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
+    resume: AcousticResumeState | None = None,
+    window_completed: Callable[[CompletedAcousticWindow], None] | None = None,
 ) -> AcousticLatents:
     """Generate all overlapping latent windows from autoregressive states."""
 
@@ -173,10 +193,32 @@ def generate_acoustic_latents(
     if not windows:
         raise ValueError("At least one autoregressive frame is required")
 
-    chunks = []
+    chunks: list[LatentChunk] = []
     previous_latent = None
     previous_condition = None
-    for window in windows:
+    if resume is not None:
+        if len(resume.chunks) > len(windows):
+            raise ValueError("Restored acoustic chunks exceed calculated windows")
+        for expected, restored in zip(
+            windows, resume.chunks, strict=False
+        ):
+            if restored.window != expected:
+                raise ValueError(
+                    "Restored acoustic chunks must match the calculated window prefix"
+                )
+        has_latent = resume.previous_latent is not None
+        has_condition = resume.previous_condition is not None
+        if has_latent != has_condition:
+            raise ValueError("Restored acoustic carry must be complete")
+        if resume.chunks and len(resume.chunks) < len(windows) and not has_latent:
+            raise ValueError("Restored acoustic prefix requires overlap carry")
+        if not resume.chunks and has_latent:
+            raise ValueError("Restored acoustic carry requires a completed prefix")
+        chunks.extend(resume.chunks)
+        previous_latent = resume.previous_latent
+        previous_condition = resume.previous_condition
+
+    for window in windows[len(chunks) :]:
         if cancelled is not None and cancelled():
             raise InterruptedError("Music 3 acoustic generation was cancelled")
         condition = condition_encoder(frame_hiddens[:, window.start : window.end])
@@ -203,5 +245,14 @@ def generate_acoustic_latents(
             progress=report,
             cancelled=cancelled,
         )
-        chunks.append(LatentChunk(window=window, latents=latents))
+        chunk = LatentChunk(window=window, latents=latents)
+        chunks.append(chunk)
+        if window_completed is not None:
+            window_completed(
+                CompletedAcousticWindow(
+                    chunk=chunk,
+                    next_latent=previous_latent,
+                    next_condition=previous_condition,
+                )
+            )
     return AcousticLatents(chunks=tuple(chunks))

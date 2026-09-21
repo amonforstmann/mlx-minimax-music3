@@ -109,6 +109,57 @@ end token sooner. Set `min_audio_duration` to suppress early stopping until a
 required minimum; setting both values to the same duration requests an exact
 autoregressive frame count.
 
+### Reference conditioning
+
+A request can carry a reference code stream, one frame of codes per generated
+frame. Only the first codebook is steered. Residual codebooks and hidden states
+stay model-generated, except for a `CONTINUE` prefix, which is injected whole.
+
+```python
+from mlx_minimax_music3 import GenerationRequest, ReferenceCodes, ReferenceMode
+
+# codes: [frames, 8] from an encoded track, or [frames] captured semantic codes.
+request = GenerationRequest(
+    caption="Warm acoustic folk, intimate vocal.",
+    lyrics="[verse]\nMorning light across the room",
+    audio_duration=10.0,
+    reference_codes=ReferenceCodes.from_code_frames(codes),
+    reference_mode=ReferenceMode.GUIDANCE,
+    reference_interval=4,
+)
+```
+
+| Constructor | Input | Modes |
+|---|---|---|
+| `ReferenceCodes.from_code_frames` | `[frames, codebooks]` codes, optional `semantic_candidates` | all three |
+| `ReferenceCodes.from_semantic_codes` | `[frames]` semantic codes, optional `semantic_candidates` | `GUIDANCE`, `COVER`, and a degraded `CONTINUE` |
+| `ReferenceCodes.from_semantic_candidates` | `[frames, k]` ranked candidates plus `candidates_per_frame` | `GUIDANCE`, `COVER` |
+
+| Mode | Effect |
+|---|---|
+| `GUIDANCE` | Biases the semantic draw towards the reference candidates on every `reference_interval`-th covered frame and leaves the frames between them free. The bias is finite, so a confident model can keep its own code |
+| `COVER` | Restricts the semantic code to the reference code on every covered frame |
+| `CONTINUE` | Injects the stream as context before the first generated frame, then free-runs |
+
+Reference frame zero aligns with the first generated frame. Frames past the end of
+the stream free-run. `reference_interval` accepts 1 through 10 and applies only to
+`GUIDANCE`. The other modes reject a non-default interval. Without
+`reference_codes` the request is text-only and generation is unchanged for the same
+seed.
+
+`GUIDANCE` and `COVER` emit the frames they steer, so `audio_duration` covers the
+reference window and the free frames together. A reference longer than that
+duration keeps its tail unused and warns. A `CONTINUE` prefix is context rather
+than output: it is absent from the result, and `audio_duration` counts only new
+frames. A semantic-only `CONTINUE` stream cannot prefill residual codebooks, so the
+depth decoder resynthesizes them and the run warns.
+
+While a reference window is live the stop token is masked, so the model cannot end
+the song before or inside the reference. Coverage still has two limits: the
+duration ceiling can cut the reference short, and the loop's first frame is
+feedback for `<|audio_start|>`, which is never steered and never part of the
+result.
+
 To test lower-precision acoustic inference without creating another checkpoint,
 cast the FP32 flow parameters once as their shards load. The model keeps its
 Euler state and final waveform decode in FP32:

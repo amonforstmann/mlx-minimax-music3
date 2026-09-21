@@ -41,6 +41,7 @@ from .models.condition_encoder import ConditionEncoder
 from .models.flow_transformer import FlowTransformer
 from .models.qwen3 import Qwen3ForCausalLM
 from .models.rvq_depth import RVQDepthDecoder
+from .reference import MIN_REFERENCE_INTERVAL, ReferenceCodes, ReferenceMode
 from .stages import (
     DEFAULT_STAGE_MEMORY_POLICY,
     StageMemoryPolicy,
@@ -89,7 +90,14 @@ class _AcousticModels:
 
 @dataclass(frozen=True, slots=True)
 class GenerationRequest:
-    """Text conditioning and deterministic generation controls."""
+    """Text conditioning, reference conditioning, and generation controls.
+
+    `reference_codes` is optional. Without it the request is text-only and
+    generation is free-running. With it, `reference_mode` and `reference_interval`
+    decide how the reference steers the semantic codebook (see `reference.py`).
+    `audio_duration` counts the steered frames under `GUIDANCE` and `COVER`, and
+    counts only new frames under `CONTINUE`, whose prefix is context.
+    """
 
     caption: str
     lyrics: str
@@ -100,6 +108,9 @@ class GenerationRequest:
     flow_steps: int = 30
     flow_cfg_scale: float = 1.7
     min_audio_duration: float = 0.0
+    reference_codes: ReferenceCodes | None = None
+    reference_mode: ReferenceMode = ReferenceMode.GUIDANCE
+    reference_interval: int = MIN_REFERENCE_INTERVAL
 
     def __post_init__(self) -> None:
         _ = self.autoregressive_config, self.flow_config
@@ -112,6 +123,9 @@ class GenerationRequest:
             cfg_scale=self.autoregressive_cfg_scale,
             top_k=self.autoregressive_top_k,
             min_audio_duration=self.min_audio_duration,
+            reference_codes=self.reference_codes,
+            reference_mode=self.reference_mode,
+            reference_interval=self.reference_interval,
         )
 
     @property

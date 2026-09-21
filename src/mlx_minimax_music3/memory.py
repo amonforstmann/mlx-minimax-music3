@@ -15,7 +15,7 @@ _BYTE_UNITS = {
     "G": 1 << 30,
     "T": 1 << 40,
 }
-_SWAP_USED_RE = re.compile(r"\bused\s*=\s*([0-9]+(?:\.[0-9]+)?)\s*([BKMGT])\b")
+_SWAP_USED_RE = re.compile(r"\bused\s*=\s*([0-9]+(?:[.,][0-9]+)?)\s*([BKMGT])\b")
 _FREE_PERCENT_RE = re.compile(r"System-wide memory free percentage:\s*([0-9]+)%")
 _PAGE_SIZE_RE = re.compile(r"page size of\s+([0-9]+) bytes")
 _VM_COUNTER_RE = re.compile(r"^(Swapins|Swapouts):\s*([0-9]+)\.", re.MULTILINE)
@@ -85,7 +85,7 @@ def parse_swap_used(output: str) -> int:
     match = _SWAP_USED_RE.search(output)
     if match is None:
         raise ValueError("could not parse vm.swapusage output")
-    return round(float(match.group(1)) * _BYTE_UNITS[match.group(2)])
+    return round(float(match.group(1).replace(",", ".")) * _BYTE_UNITS[match.group(2)])
 
 
 def parse_free_percent(output: str) -> int:

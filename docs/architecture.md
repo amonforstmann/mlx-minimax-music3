@@ -152,6 +152,11 @@ weights. A stage session must materialize every durable output before teardown.
 Teardown is verified through memory telemetry and tests; garbage collection alone
 is not accepted as the lifecycle design.
 
+`stage_runners.py` runs each weight-owning stage inside its own `StageSession`
+and returns the evaluated handoff with the stage's memory report. `pipeline.py`
+calls the runners in order and saves and restores the generation checkpoint. It
+does not hold model weights.
+
 ## Model residency
 
 Apple silicon uses unified memory, but keeping every component resident is still

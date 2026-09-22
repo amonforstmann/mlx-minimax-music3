@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import mlx.core as mx
@@ -7,9 +8,13 @@ import mlx.core as mx
 from mlx_minimax_music3.acoustic import LatentChunk
 from mlx_minimax_music3.autoregressive import AutoregressiveResult
 from mlx_minimax_music3.chunking import ChunkWindow
-from mlx_minimax_music3.generation_checkpoint import GenerationCheckpointStore
+from mlx_minimax_music3.generation_checkpoint import (
+    GenerationCheckpointStore,
+    generation_fingerprint,
+)
 from mlx_minimax_music3.manifest import CheckpointManifest, ComponentManifest
 from mlx_minimax_music3.pipeline import GenerationRequest
+from mlx_minimax_music3.reference import ReferenceCodes, ReferenceMode
 
 
 def _model_manifest() -> CheckpointManifest:
@@ -127,6 +132,23 @@ def test_incompatible_or_partial_checkpoint_recomputes_last_valid_boundary(
     )
     assert restored.autoregressive is None
     assert restored.acoustic is None
+
+
+def test_reference_conditioning_changes_the_generation_fingerprint() -> None:
+    text_only = _request()
+    referenced = replace(
+        text_only,
+        reference_codes=ReferenceCodes.from_semantic_codes((5, 6)),
+        reference_mode=ReferenceMode.COVER,
+    )
+    identity = {
+        "flow_compute_dtype": "float32",
+        "model_manifest": _model_manifest(),
+    }
+
+    assert generation_fingerprint(text_only, **identity) != generation_fingerprint(
+        referenced, **identity
+    )
 
 
 def test_inconsistent_autoregressive_stop_state_invalidates_cache(

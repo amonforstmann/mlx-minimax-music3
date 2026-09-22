@@ -5,10 +5,10 @@ from __future__ import annotations
 import math
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Protocol
 
 import mlx.core as mx
 
+from .frames import advance_frame, generate_depth_codes, prefill_frame_codes
 from .models.qwen3 import Qwen3ForCausalLM
 from .models.rvq_depth import RVQDepthDecoder
 from .prompting import (
@@ -17,7 +17,20 @@ from .prompting import (
     MAX_AUDIO_FRAMES,
     SEMANTIC_VOCAB_SIZE,
 )
+from .reference import (
+    MIN_REFERENCE_INTERVAL,
+    ReferenceCodes,
+    ReferenceConstraint,
+    ReferenceMode,
+    ReferencePlan,
+    cover_logits,
+    guidance_logits,
+    stop_allowed,
+    validate_reference_controls,
+    validate_reference_stream,
+)
 from .sampling import (
+    Sampler,
     SeedSchedule,
     classifier_free_guidance,
     sample_top_k,
@@ -27,17 +40,6 @@ from .tokenizer import TokenizedPrompt
 FRAME_RATE = 25
 AR_CFG_SCALE = 1.5
 AR_TOP_K = 50
-
-
-class Sampler(Protocol):
-    def __call__(
-        self,
-        logits: mx.array,
-        *,
-        top_k: int,
-        seed: int,
-        position: int,
-    ) -> mx.array: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +53,9 @@ class AutoregressiveConfig:
     frame_rate: int = FRAME_RATE
     buffer_flush_interval: int = 32
     min_audio_duration: float = 0.0
+    reference_codes: ReferenceCodes | None = None
+    reference_mode: ReferenceMode = ReferenceMode.GUIDANCE
+    reference_interval: int = MIN_REFERENCE_INTERVAL
 
     def __post_init__(self) -> None:
         if not math.isfinite(self.audio_duration) or self.audio_duration <= 0:
@@ -69,6 +74,23 @@ class AutoregressiveConfig:
             value = getattr(self, name)
             if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
                 raise ValueError(f"{name} must be a positive integer")
+        validate_reference_controls(self.reference_mode, self.reference_interval)
+        if self.reference_codes is not None and not isinstance(
+            self.reference_codes, ReferenceCodes
+        ):
+            raise TypeError("reference_codes must be a ReferenceCodes instance")
+
+    @property
+    def reference_plan(self) -> ReferencePlan | None:
+        """Return the resolved reference plan, or `None` without a reference."""
+
+        if self.reference_codes is None:
+            return None
+        return ReferencePlan(
+            codes=self.reference_codes,
+            mode=self.reference_mode,
+            interval=self.reference_interval,
+        )
 
     @property
     def max_frames(self) -> int:
@@ -182,6 +204,7 @@ def _sample_semantic_code(
     seed: int,
     position: int,
     sampler: Sampler,
+    reference: ReferenceConstraint | None = None,
 ) -> mx.array:
     # Project only the rows that c0 sampling can return. The dense checkpoint has
     # a 200,000-token language head, while Music 3 uses 16,384 semantic codes and
@@ -194,21 +217,36 @@ def _sample_semantic_code(
         last_hidden,
         allow_stop=allow_stop,
     )
-    conditional = allowed_logits[:1]
     guided = classifier_free_guidance(allowed_logits, scale=cfg_scale)
-    guided = mx.where(
-        conditional
-        < mx.topk(
-            conditional,
-            k=min(top_k, conditional.shape[-1]),
-            axis=-1,
-        )[..., -1:],
-        -mx.inf,
-        guided,
-    )
+    columns = guided.shape[-1]
+    if reference is not None and reference.mode is ReferenceMode.COVER:
+        # A covered frame has to emit its reference code, so only that column stays
+        # reachable and the draw ranges over the reference set alone.
+        guided = cover_logits(guided, reference.candidates)
+        draw_top_k = len(reference.candidates)
+    else:
+        conditional = allowed_logits[:1]
+        window = mx.where(
+            conditional
+            < mx.topk(
+                conditional,
+                k=min(top_k, conditional.shape[-1]),
+                axis=-1,
+            )[..., -1:],
+            -mx.inf,
+            guided,
+        )
+        if reference is None:
+            guided = window
+            draw_top_k = min(top_k, columns)
+        else:
+            # The draw spans the model's window plus every candidate, so no
+            # reference code is dropped before the sampler sees it.
+            guided = guidance_logits(guided, window, reference.candidates)
+            draw_top_k = min(columns, top_k + len(reference.candidates))
     local_index = sampler(
         guided,
-        top_k=min(top_k, guided.shape[-1]),
+        top_k=draw_top_k,
         seed=seed,
         position=position,
     )
@@ -217,82 +255,6 @@ def _sample_semantic_code(
         mx.array(AUDIO_END_TOKEN_ID, dtype=mx.int32),
         local_index + AUDIO_CODE_OFFSET - 1,
     ).astype(mx.int32)
-
-
-def _generate_depth_codes(
-    language_model: Qwen3ForCausalLM,
-    decoder: RVQDepthDecoder,
-    last_hidden: mx.array,
-    semantic_token: mx.array,
-    *,
-    frame_index: int,
-    cfg_scale: float,
-    top_k: int,
-    seeds: SeedSchedule,
-    sampler: Sampler,
-) -> tuple[mx.array, mx.array]:
-    semantic_code = semantic_token - AUDIO_CODE_OFFSET
-    paired_semantic = mx.repeat(semantic_code, 2, axis=0)
-    semantic_embedding = language_model.model.embed_tokens(
-        paired_semantic + AUDIO_CODE_OFFSET
-    )
-    first_inputs = mx.stack(
-        (
-            decoder.projection(last_hidden),
-            decoder.projection(semantic_embedding),
-        ),
-        axis=1,
-    )
-    cache = decoder.make_cache()
-    hidden = decoder(first_inputs, cache=cache)[:, -1]
-
-    sampled_codes = [semantic_code]
-    hidden_parts = []
-    for codebook_index in range(1, decoder.config.num_codebooks):
-        hidden_parts.append(hidden[:1])
-        logits = decoder.logits(hidden, codebook_index=codebook_index)
-        guided = classifier_free_guidance(logits, scale=cfg_scale)
-        sampled = sampler(
-            guided,
-            top_k=min(top_k, decoder.config.audio_vocab_size),
-            seed=seeds.sampling_seed,
-            position=seeds.position(
-                frame_index=frame_index,
-                codebook_index=codebook_index,
-            ),
-        )
-        sampled_codes.append(sampled)
-        if codebook_index < decoder.config.num_codebooks - 1:
-            paired = mx.repeat(sampled, 2, axis=0)
-            embedding = decoder.embed_residual_code(
-                paired, codebook_index=codebook_index
-            )
-            projected = decoder.projection(embedding)[:, None, :]
-            hidden = decoder(projected, cache=cache)[:, -1]
-
-    codes = mx.stack(sampled_codes, axis=-1)
-    depth_hiddens = mx.concatenate(hidden_parts, axis=-1)
-    return codes, depth_hiddens
-
-
-def _embed_audio_frame(
-    language_model: Qwen3ForCausalLM,
-    decoder: RVQDepthDecoder,
-    codes: mx.array,
-) -> mx.array:
-    paired_codes = mx.repeat(codes, 2, axis=0)
-    semantic = language_model.model.embed_tokens(
-        paired_codes[:, :1] + AUDIO_CODE_OFFSET
-    )
-    offsets = (
-        mx.arange(decoder.config.num_residual_codebooks, dtype=mx.int32)
-        * decoder.config.audio_vocab_size
-    )[None, :]
-    residual = decoder.audio_embeddings(paired_codes[:, 1:] + offsets)
-    residual = residual.sum(axis=1, keepdims=True)
-    return (semantic + residual.astype(semantic.dtype)) * (
-        decoder.config.num_codebooks**-0.5
-    )
 
 
 def generate_autoregressive(
@@ -305,7 +267,17 @@ def generate_autoregressive(
     progress: Callable[[GenerationProgress], None] | None = None,
     cancelled: Callable[[], bool] | None = None,
 ) -> AutoregressiveResult:
-    """Generate Music 3 frame codes and hidden-state conditioning."""
+    """Generate Music 3 frame codes and hidden-state conditioning.
+
+    A `reference_codes` stream on the config steers the semantic codebook as
+    described in `reference.py`. Without one, the loop is free-running and its
+    output depends only on the prompt, the seed, and the sampling controls.
+
+    A `CONTINUE` prefix is context: it runs before the first emitted frame, extends
+    the key-value cache beyond the requested duration, and is absent from the
+    result. `GUIDANCE` and `COVER` emit the frames they steer, and a live reference
+    window masks the stop token so the reference cannot be cut short.
+    """
 
     if language_model.config.hidden_size != decoder.config.hidden_size:
         raise ValueError("Language model and RVQ decoder hidden sizes must match")
@@ -313,8 +285,22 @@ def generate_autoregressive(
         raise ValueError("Language-model vocabulary cannot represent Music 3 codes")
 
     max_frames = config.max_frames
+    plan = config.reference_plan
+    prefix_frames = 0
+    if plan is not None:
+        validate_reference_stream(
+            plan,
+            num_codebooks=decoder.config.num_codebooks,
+            audio_vocab_size=decoder.config.audio_vocab_size,
+            max_frames=max_frames,
+            top_k=config.top_k,
+        )
+        prefix_frames = plan.prefix_frames
+
     text_ids = mx.array(prompt.rows(), dtype=mx.int32)
-    cache = language_model.make_cache(capacity=prompt.length + max_frames)
+    cache = language_model.make_cache(
+        capacity=prompt.length + max_frames + prefix_frames
+    )
     last_hidden = language_model.model(text_ids, cache=cache)[:, -1]
     mx.eval(last_hidden)
 
@@ -329,24 +315,47 @@ def generate_autoregressive(
     stopped_on_audio_end = False
 
     # Frame zero advances past <|audio_start|>; it is feedback, not output.
-    for frame_index in range(max_frames + 1):
+    for frame_index in range(max_frames + prefix_frames + 1):
         if cancelled is not None and cancelled():
             raise InterruptedError("Music 3 autoregressive generation was cancelled")
+        # Reference frame zero belongs to the frame after the feedback frame.
+        reference_index = frame_index - 1
+        if plan is not None and plan.prefills(reference_index):
+            codes = prefill_frame_codes(
+                language_model,
+                decoder,
+                last_hidden,
+                plan.codes.code_frame(reference_index),
+                frame_index=frame_index,
+                cfg_scale=config.cfg_scale,
+                top_k=config.top_k,
+                seeds=seeds,
+                sampler=sampler,
+            )
+            last_hidden = advance_frame(language_model, decoder, codes, cache)
+            continue
+
         semantic_token = _sample_semantic_code(
             language_model,
             last_hidden,
-            allow_stop=frames.count >= config.min_frames,
+            allow_stop=stop_allowed(
+                completed_frames=frames.count,
+                frame_index=frame_index,
+                min_frames=config.min_frames,
+                plan=plan,
+            ),
             cfg_scale=config.cfg_scale,
             top_k=config.top_k,
             seed=seeds.sampling_seed,
             position=seeds.position(frame_index=frame_index, codebook_index=0),
             sampler=sampler,
+            reference=None if plan is None else plan.constraint(reference_index),
         )
         if int(semantic_token.item()) == AUDIO_END_TOKEN_ID:
             stopped_on_audio_end = True
             break
 
-        codes, depth_hiddens = _generate_depth_codes(
+        codes, depth_hiddens = generate_depth_codes(
             language_model,
             decoder,
             last_hidden,
@@ -365,11 +374,7 @@ def generate_autoregressive(
             if frames.count >= max_frames:
                 break
 
-        feedback = _embed_audio_frame(language_model, decoder, codes)
-        last_hidden = language_model.model(
-            inputs_embeds=feedback,
-            cache=cache,
-        )[:, -1]
+        last_hidden = advance_frame(language_model, decoder, codes, cache)
 
     codes, frame_hiddens = frames.finish()
     return AutoregressiveResult(

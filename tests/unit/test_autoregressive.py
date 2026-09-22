@@ -8,17 +8,19 @@ from mlx_minimax_music3.autoregressive import (
     _restricted_semantic_logits,
     generate_autoregressive,
 )
-from mlx_minimax_music3.config import Qwen3Config, RVQDepthDecoderConfig
-from mlx_minimax_music3.models.qwen3 import Qwen3ForCausalLM
-from mlx_minimax_music3.models.rvq_depth import RVQDepthDecoder
 from mlx_minimax_music3.prompting import (
     AUDIO_CODE_OFFSET,
     AUDIO_END_TOKEN_ID,
     SEMANTIC_VOCAB_SIZE,
 )
-from mlx_minimax_music3.tokenizer import TokenizedPrompt
-
-_HIDDEN_SIZE = 16
+from mlx_minimax_music3.reference import ReferenceCodes, ReferenceMode
+from tests.support.tiny_autoregressive import (
+    HIDDEN_SIZE,
+    NUM_CODEBOOKS,
+    build_tiny_models,
+    fixed_length_config,
+    tiny_prompt,
+)
 
 
 def _argmax_sampler(
@@ -36,43 +38,9 @@ def _literal_argmax_sampler(
     return mx.argmax(logits, axis=-1).astype(mx.int32)
 
 
-def _tiny_models() -> tuple[Qwen3ForCausalLM, RVQDepthDecoder]:
-    language_model = Qwen3ForCausalLM(
-        Qwen3Config(
-            hidden_size=_HIDDEN_SIZE,
-            intermediate_size=32,
-            num_hidden_layers=1,
-            num_attention_heads=4,
-            num_key_value_heads=2,
-            head_dim=4,
-            vocab_size=170_000,
-            max_position_embeddings=16,
-            published_dtype="float32",
-        )
-    )
-    decoder = RVQDepthDecoder(
-        RVQDepthDecoderConfig(
-            hidden_size=_HIDDEN_SIZE,
-            intermediate_size=32,
-            num_layers=1,
-            num_attention_heads=4,
-            audio_vocab_size=32,
-            num_codebooks=4,
-            max_position_embeddings=8,
-        )
-    )
-    language_model.lm_head.weight = mx.zeros_like(language_model.lm_head.weight)
-    for head in decoder.audio_heads:
-        head.weight = mx.zeros_like(head.weight)
-    return language_model, decoder
-
-
 def test_tiny_autoregressive_loop_produces_aligned_frames() -> None:
-    language_model, decoder = _tiny_models()
-    prompt = TokenizedPrompt(
-        conditional=(1, 2, 3),
-        unconditional=(1, 4, 3),
-    )
+    language_model, decoder = build_tiny_models()
+    prompt = tiny_prompt()
 
     result = generate_autoregressive(
         language_model,
@@ -84,17 +52,14 @@ def test_tiny_autoregressive_loop_produces_aligned_frames() -> None:
     mx.eval(result.codes, result.frame_hiddens)
 
     assert result.codes.shape == (1, 2, 4)
-    assert result.frame_hiddens.shape == (1, 2, 4 * _HIDDEN_SIZE)
+    assert result.frame_hiddens.shape == (1, 2, NUM_CODEBOOKS * HIDDEN_SIZE)
     assert not result.stopped_on_audio_end
     assert mx.array_equal(result.codes, mx.zeros_like(result.codes)).item()
 
 
 def test_minimum_duration_masks_early_stop_until_required_frames() -> None:
-    language_model, decoder = _tiny_models()
-    prompt = TokenizedPrompt(
-        conditional=(1, 2, 3),
-        unconditional=(1, 4, 3),
-    )
+    language_model, decoder = build_tiny_models()
+    prompt = tiny_prompt()
 
     result = generate_autoregressive(
         language_model,
@@ -114,7 +79,7 @@ def test_minimum_duration_masks_early_stop_until_required_frames() -> None:
 
 
 def test_restricted_semantic_head_matches_full_projection() -> None:
-    language_model, _ = _tiny_models()
+    language_model, _ = build_tiny_models()
     weight = language_model.lm_head.weight
     rows = mx.arange(weight.shape[0], dtype=mx.float32)[:, None]
     columns = mx.arange(weight.shape[1], dtype=mx.float32)[None, :]
@@ -142,6 +107,81 @@ def test_restricted_semantic_head_matches_full_projection() -> None:
     mx.eval(expected, actual)
 
     assert mx.allclose(actual, expected, rtol=0, atol=0).item()
+
+
+def test_reference_controls_without_codes_match_the_free_running_baseline() -> None:
+    language_model, decoder = build_tiny_models(
+        head_seed=17,
+        max_position_embeddings=64,
+    )
+    prompt = tiny_prompt()
+
+    baseline = generate_autoregressive(
+        language_model,
+        decoder,
+        prompt,
+        fixed_length_config(6),
+    )
+    steerable = generate_autoregressive(
+        language_model,
+        decoder,
+        prompt,
+        fixed_length_config(6, reference_mode=ReferenceMode.COVER),
+    )
+    mx.eval(
+        baseline.codes,
+        baseline.frame_hiddens,
+        steerable.codes,
+        steerable.frame_hiddens,
+    )
+
+    assert mx.array_equal(steerable.codes, baseline.codes).item()
+    assert mx.array_equal(steerable.frame_hiddens, baseline.frame_hiddens).item()
+    assert steerable.stopped_on_audio_end == baseline.stopped_on_audio_end
+
+
+@pytest.mark.parametrize("interval", [0, 11])
+def test_autoregressive_config_rejects_out_of_range_reference_interval(
+    interval: int,
+) -> None:
+    with pytest.raises(ValueError, match="reference_interval must be in"):
+        AutoregressiveConfig(reference_interval=interval)
+
+
+def test_autoregressive_config_rejects_a_reference_mode_string() -> None:
+    with pytest.raises(TypeError, match="reference_mode must be a ReferenceMode"):
+        AutoregressiveConfig(reference_mode="cover")
+
+
+def test_autoregressive_config_rejects_unwrapped_reference_codes() -> None:
+    with pytest.raises(TypeError, match="reference_codes must be a ReferenceCodes"):
+        AutoregressiveConfig(reference_codes=((1,),))
+
+
+def test_reference_plan_is_absent_without_a_code_stream() -> None:
+    config = AutoregressiveConfig(reference_mode=ReferenceMode.COVER)
+
+    assert config.reference_plan is None
+
+
+def test_reference_plan_carries_the_configured_controls() -> None:
+    codes = ReferenceCodes.from_semantic_codes((3, 4))
+
+    plan = AutoregressiveConfig(
+        reference_codes=codes,
+        reference_mode=ReferenceMode.GUIDANCE,
+        reference_interval=2,
+    ).reference_plan
+
+    assert plan is not None
+    assert plan.codes == codes
+    assert plan.mode is ReferenceMode.GUIDANCE
+    assert plan.interval == 2
+
+
+def test_autoregressive_config_rejects_an_interval_outside_guidance() -> None:
+    with pytest.raises(ValueError, match="applies only to ReferenceMode.GUIDANCE"):
+        AutoregressiveConfig(reference_mode=ReferenceMode.COVER, reference_interval=3)
 
 
 @pytest.mark.parametrize("seed", [-1, 2**64])

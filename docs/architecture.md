@@ -25,6 +25,38 @@ The released model uses eight Residual Vector Quantization (RVQ) codebooks per
 frame. The first codebook has 16,384 entries; each of the remaining seven has
 1,024 entries.
 
+#### Reference conditioning
+
+A request may carry a reference code stream, one frame of RVQ codes per generated
+frame, with optional semantic alternates per frame. An encoder emits every
+codebook of every frame. A stream captured from an earlier generation's semantic
+head carries the first codebook alone.
+
+The stream steers only the first codebook. `GUIDANCE` subtracts a fixed penalty
+from every non-candidate column on each interval-th covered frame, so the draw is
+biased but a non-candidate code stays reachable. `COVER` leaves only the reference
+column reachable on every covered frame. `CONTINUE` injects whole reference frames
+as context before the first emitted frame, then frees the loop.
+
+Under `GUIDANCE` and `COVER`, residual codebooks and hidden states are
+model-generated, so the acoustic stage receives the conditioning it receives for a
+text-only request. A steered draw covers the model's own top-k window plus every
+reference candidate, so a candidate outside that window is still reachable.
+
+A `CONTINUE` prefix never enters the result. It extends the key-value cache beyond
+the requested duration and needs every codebook: a semantic-only stream makes the
+depth decoder resynthesize the residual codes, which is reported as a quality
+warning. Because the prefix is context, the requested duration always counts new
+frames.
+
+A live reference window masks the stop token, so the model cannot end the song
+before or inside the reference. Two limits remain. A reference longer than the
+requested duration keeps its tail unused, reported as a quality warning. The
+reference never covers the loop's first frame, which is feedback for
+`<|audio_start|>` and is not part of the result.
+
+Without a stream the autoregressive loop is byte-identical to a text-only run.
+
 ### Acoustic synthesis
 
 The second phase converts fused hidden states into waveform audio:
@@ -56,6 +88,8 @@ src/mlx_minimax_music3/
 ├── loading.py
 ├── tokenizer.py
 ├── prompting.py
+├── reference.py
+├── frames.py
 ├── sampling.py
 ├── chunking.py
 ├── audio.py
@@ -177,10 +211,10 @@ unvalidated quantization policies, and implicit fallbacks are hard errors.
 ## Public API boundary
 
 The alpha API exposes a small immutable request, an explicit local checkpoint
-path, deterministic seed handling, native waveform output, optional atomic WAV
-writing, and stage memory reports. Internal codebook tensors,
-framework-specific schedulers, model owners, and checkpoint mappings remain
-private. A `Music3Pipeline` retains only its validated manifest and tokenizer;
-generation is serialized and no model weights survive a completed stage.
-Restored stages skip model loading and report zero elapsed time. Memory reports list
-only stages whose models loaded during the current call.
+path, deterministic seed handling, optional reference conditioning, native
+waveform output, optional atomic WAV writing, and stage memory reports. Internal
+codebook tensors, framework-specific schedulers, model owners, and checkpoint
+mappings remain private. A `Music3Pipeline` retains only its validated manifest
+and tokenizer. Generation is serialized and no model weights survive a completed
+stage. Restored stages skip model loading and report zero elapsed time. Memory
+reports list only stages whose models loaded during the current call.

@@ -7,12 +7,24 @@ import hashlib
 import math
 import sys
 from dataclasses import dataclass
+from typing import Protocol
 
 import mlx.core as mx
 
 _UINT32_MASK = 0xFFFF_FFFF
 _SAMPLING_SEED_MASK = 0x7FFF_FFFF
 _SAMPLING_NAMESPACE = "minimax-ttm-ar"
+
+
+class Sampler(Protocol):
+    def __call__(
+        self,
+        logits: mx.array,
+        *,
+        top_k: int,
+        seed: int,
+        position: int,
+    ) -> mx.array: ...
 
 
 def derive_sampling_seed(

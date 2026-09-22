@@ -26,3 +26,9 @@ All notable project changes are documented here.
 - Separate unit and weightless golden integration test tiers with explicit CI
   cadence and a metadata-only Official topology contract.
 - Add a PyPI trusted-publishing workflow for GitHub pre-releases.
+- Add optional reference-code conditioning for the semantic codebook. Guidance
+  biases the draw with a finite logit penalty calibrated against the selective-q8
+  checkpoint, cover restricts each covered frame to its reference code, and
+  continue injects whole reference frames as context that stays out of the result.
+  A live reference window masks the audio-end token. A text-only request keeps its
+  previous output for the same seed.

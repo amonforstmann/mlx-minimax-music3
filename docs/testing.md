@@ -48,6 +48,14 @@ reviewable metadata or numerical reference vectors belong in the test suite. A
 fixture update must explain the intended contract change and must never be an
 automatic response to a failing golden assertion.
 
+Reference conditioning is covered by both tiers with miniature models, the real
+sampler, and the real loop. Miniature logits are far more peaked than the released
+checkpoint's, so the guidance tests pin both ends of the calibrated bias instead of
+asserting the shipped value's behavior. `dev/verify_reference_conditioning.py`
+repeats the comparisons against a local checkpoint when a change touches semantic
+sampling, and it is where the shipped bias was calibrated. It prints a JSON report
+and is run by hand, never from pytest.
+
 Listening validation with complete dense or quantized weights is a separate
 release-quality activity. It must not be represented as a pytest pass/fail check
 or added to the default CI suite.

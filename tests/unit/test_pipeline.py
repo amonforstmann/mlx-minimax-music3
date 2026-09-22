@@ -7,12 +7,18 @@ from types import SimpleNamespace
 import mlx.core as mx
 import pytest
 
-from mlx_minimax_music3 import pipeline
-from mlx_minimax_music3.acoustic import AcousticLatents, LatentChunk
+from mlx_minimax_music3 import pipeline, stage_runners
+from mlx_minimax_music3.acoustic import (
+    AcousticLatents,
+    AcousticResumeState,
+    FlowGenerationConfig,
+    LatentChunk,
+)
 from mlx_minimax_music3.autoregressive import AutoregressiveResult
 from mlx_minimax_music3.chunking import ChunkWindow
 from mlx_minimax_music3.decoding import Waveform
 from mlx_minimax_music3.manifest import CheckpointManifest, ComponentManifest
+from mlx_minimax_music3.stages import StageMemoryPolicy
 from mlx_minimax_music3.tokenizer import TokenizedPrompt
 
 
@@ -59,22 +65,24 @@ def test_private_pipeline_orders_residency_and_writes_audio(
 
     def load_autoregressive(checkpoint: Path):
         load_order.append("autoregressive")
-        return pipeline._AutoregressiveModels(None, None)
+        return stage_runners._AutoregressiveModels(None, None)
 
     def load_acoustic(checkpoint: Path, flow_compute_dtype: str):
         assert flow_compute_dtype == "float32"
         load_order.append("acoustic")
-        return pipeline._AcousticModels(None, None)
+        return stage_runners._AcousticModels(None, None)
 
     def load_vocoder(checkpoint: Path):
         load_order.append("decode")
         return object()
 
-    monkeypatch.setattr(pipeline, "_load_autoregressive_models", load_autoregressive)
-    monkeypatch.setattr(pipeline, "_load_acoustic_models", load_acoustic)
-    monkeypatch.setattr(pipeline, "load_vocoder", load_vocoder)
     monkeypatch.setattr(
-        pipeline,
+        stage_runners, "_load_autoregressive_models", load_autoregressive
+    )
+    monkeypatch.setattr(stage_runners, "_load_acoustic_models", load_acoustic)
+    monkeypatch.setattr(stage_runners, "load_vocoder", load_vocoder)
+    monkeypatch.setattr(
+        stage_runners,
         "generate_autoregressive",
         lambda *args, **kwargs: AutoregressiveResult(
             codes=mx.zeros((1, 1, 8), dtype=mx.int32),
@@ -84,14 +92,14 @@ def test_private_pipeline_orders_residency_and_writes_audio(
     )
     window = ChunkWindow(0, 0, 1, True, True)
     monkeypatch.setattr(
-        pipeline,
+        stage_runners,
         "generate_acoustic_latents",
         lambda *args, **kwargs: AcousticLatents(
             chunks=(LatentChunk(window, mx.zeros((1, 3, 128))),)
         ),
     )
     monkeypatch.setattr(
-        pipeline,
+        stage_runners,
         "decode_latent_chunks",
         lambda *args, **kwargs: Waveform(mx.zeros((2, 8)), sample_rate=44_100),
     )
@@ -239,7 +247,7 @@ def test_restored_stages_report_defined_metadata_and_progress(
 
     monkeypatch.setattr(
         pipeline,
-        "_run_autoregressive_stage",
+        "run_autoregressive_stage",
         lambda *args, **kwargs: (
             autoregressive,
             SimpleNamespace(label="autoregressive"),
@@ -258,10 +266,10 @@ def test_restored_stages_report_defined_metadata_and_progress(
             )
         return acoustic, SimpleNamespace(label="acoustic")
 
-    monkeypatch.setattr(pipeline, "_run_acoustic_stage", run_acoustic)
+    monkeypatch.setattr(pipeline, "run_acoustic_stage", run_acoustic)
     monkeypatch.setattr(
         pipeline,
-        "_run_decode_stage",
+        "run_decode_stage",
         lambda *args, **kwargs: (
             Waveform(mx.zeros((2, 8)), sample_rate=44_100),
             SimpleNamespace(label="decode"),
@@ -283,12 +291,12 @@ def test_restored_stages_report_defined_metadata_and_progress(
 
     monkeypatch.setattr(
         pipeline,
-        "_run_autoregressive_stage",
+        "run_autoregressive_stage",
         lambda *args, **kwargs: pytest.fail("restored AR stage was loaded"),
     )
     monkeypatch.setattr(
         pipeline,
-        "_run_acoustic_stage",
+        "run_acoustic_stage",
         lambda *args, **kwargs: pytest.fail("restored acoustic stage was loaded"),
     )
     ar_progress = []
@@ -313,3 +321,48 @@ def test_restored_stages_report_defined_metadata_and_progress(
     assert ar_progress[-1].completed_frames == 250
     assert [sample.chunk_index for sample in flow_progress] == [0, 1]
     assert all(sample.step == request.flow_steps for sample in flow_progress)
+
+
+def test_acoustic_runner_forwards_resume_and_window_callback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    received: dict[str, object] = {}
+    window = ChunkWindow(0, 0, 1, True, True)
+    latents = AcousticLatents(chunks=(LatentChunk(window, mx.zeros((1, 3, 128))),))
+
+    def generate(*args, **kwargs):
+        received.update(kwargs)
+        return latents
+
+    monkeypatch.setattr(
+        stage_runners,
+        "_load_acoustic_models",
+        lambda checkpoint, flow_compute_dtype: stage_runners._AcousticModels(
+            None, None
+        ),
+    )
+    monkeypatch.setattr(stage_runners, "generate_acoustic_latents", generate)
+    resume = AcousticResumeState(
+        chunks=(), previous_latent=None, previous_condition=None
+    )
+
+    def on_window(completed: object) -> None:
+        return None
+
+    stage_runners.run_acoustic_stage(
+        Path("unused"),
+        mx.zeros((1, 1, 32)),
+        seed=0,
+        config=FlowGenerationConfig(num_steps=1),
+        flow_compute_dtype="float32",
+        policy=StageMemoryPolicy(),
+        include_footprint=False,
+        progress=None,
+        cancelled=None,
+        resume=resume,
+        window_completed=on_window,
+    )
+
+    assert received["resume"] is resume
+    assert received["window_completed"] is on_window
+

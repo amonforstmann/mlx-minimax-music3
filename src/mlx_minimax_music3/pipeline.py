@@ -9,46 +9,34 @@ from dataclasses import dataclass
 from pathlib import Path
 from threading import Lock
 
-import mlx.core as mx
-
 from .acoustic import (
     AcousticLatents,
-    AcousticResumeState,
     CompletedAcousticWindow,
     FlowGenerationConfig,
     FlowProgress,
-    generate_acoustic_latents,
 )
 from .audio import AudioFile, write_pcm16_wav
 from .autoregressive import (
     AutoregressiveConfig,
-    AutoregressiveResult,
     GenerationProgress,
-    generate_autoregressive,
 )
 from .chunking import chunk_windows
-from .decoding import Waveform, decode_latent_chunks
+from .decoding import Waveform
 from .generation_checkpoint import GenerationCheckpointStore
-from .loading import (
-    load_condition_encoder,
-    load_flow_transformer,
-    load_language_model,
-    load_rvq_depth_decoder,
-    load_vocoder,
-)
 from .manifest import CheckpointManifest, ManifestError
-from .models.condition_encoder import ConditionEncoder
-from .models.flow_transformer import FlowTransformer
-from .models.qwen3 import Qwen3ForCausalLM
-from .models.rvq_depth import RVQDepthDecoder
 from .reference import MIN_REFERENCE_INTERVAL, ReferenceCodes, ReferenceMode
+from .stage_runners import (
+    FLOW_COMPUTE_DTYPES,
+    run_acoustic_stage,
+    run_autoregressive_stage,
+    run_decode_stage,
+)
 from .stages import (
     DEFAULT_STAGE_MEMORY_POLICY,
     StageMemoryPolicy,
     StageMemoryReport,
-    StageSession,
 )
-from .tokenizer import Qwen2BPETokenizer, TokenizedPrompt
+from .tokenizer import Qwen2BPETokenizer
 
 _REQUIRED_COMPONENTS = frozenset(
     {
@@ -62,10 +50,6 @@ _REQUIRED_COMPONENTS = frozenset(
     }
 )
 _GENERATION_LOCK = Lock()
-_FLOW_COMPUTE_DTYPES = {
-    "float16": mx.float16,
-    "float32": mx.float32,
-}
 
 
 class ExperimentalQuantizationWarning(UserWarning):
@@ -74,18 +58,6 @@ class ExperimentalQuantizationWarning(UserWarning):
 
 class ExperimentalPrecisionWarning(UserWarning):
     """Warn when runtime reduced precision needs listening validation."""
-
-
-@dataclass(frozen=True, slots=True)
-class _AutoregressiveModels:
-    language_model: Qwen3ForCausalLM
-    depth_decoder: RVQDepthDecoder
-
-
-@dataclass(frozen=True, slots=True)
-class _AcousticModels:
-    condition_encoder: ConditionEncoder
-    transformer: FlowTransformer
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,123 +158,6 @@ def _validate_checkpoint(
     return root, manifest
 
 
-def _load_autoregressive_models(checkpoint: Path) -> _AutoregressiveModels:
-    return _AutoregressiveModels(
-        language_model=load_language_model(checkpoint),
-        depth_decoder=load_rvq_depth_decoder(checkpoint),
-    )
-
-
-def _load_acoustic_models(
-    checkpoint: Path,
-    flow_compute_dtype: str,
-) -> _AcousticModels:
-    return _AcousticModels(
-        condition_encoder=load_condition_encoder(checkpoint),
-        transformer=load_flow_transformer(
-            checkpoint,
-            compute_dtype=_FLOW_COMPUTE_DTYPES[flow_compute_dtype],
-        ),
-    )
-
-
-def _run_autoregressive_stage(
-    checkpoint: Path,
-    prompt: TokenizedPrompt,
-    config: AutoregressiveConfig,
-    *,
-    policy: StageMemoryPolicy,
-    include_footprint: bool,
-    progress: Callable[[GenerationProgress], None] | None,
-    cancelled: Callable[[], bool] | None,
-) -> tuple[AutoregressiveResult, StageMemoryReport]:
-    session = StageSession(
-        "autoregressive",
-        lambda: _load_autoregressive_models(checkpoint),
-        policy=policy,
-        include_footprint=include_footprint,
-    )
-    with session:
-        result = generate_autoregressive(
-            session.require_model().language_model,
-            session.require_model().depth_decoder,
-            prompt,
-            config,
-            progress=progress,
-            cancelled=cancelled,
-        )
-        session.handoff(result.codes, result.frame_hiddens)
-    if session.report is None:
-        raise RuntimeError("Autoregressive stage did not produce a memory report")
-    return result, session.report
-
-
-def _run_acoustic_stage(
-    checkpoint: Path,
-    frame_hiddens: mx.array,
-    *,
-    seed: int,
-    config: FlowGenerationConfig,
-    flow_compute_dtype: str,
-    policy: StageMemoryPolicy,
-    include_footprint: bool,
-    progress: Callable[[FlowProgress], None] | None,
-    cancelled: Callable[[], bool] | None,
-    resume: AcousticResumeState | None = None,
-    window_completed: Callable[[CompletedAcousticWindow], None] | None = None,
-) -> tuple[AcousticLatents, StageMemoryReport]:
-    session = StageSession(
-        "acoustic",
-        lambda: _load_acoustic_models(checkpoint, flow_compute_dtype),
-        policy=policy,
-        include_footprint=include_footprint,
-    )
-    with session:
-        result = generate_acoustic_latents(
-            session.require_model().transformer,
-            session.require_model().condition_encoder,
-            frame_hiddens,
-            seed=seed,
-            config=config,
-            progress=progress,
-            cancelled=cancelled,
-            resume=resume,
-            window_completed=window_completed,
-        )
-        session.handoff(*(chunk.latents for chunk in result.chunks))
-    if session.report is None:
-        raise RuntimeError("Acoustic stage did not produce a memory report")
-    return result, session.report
-
-
-def _run_decode_stage(
-    checkpoint: Path,
-    acoustic: AcousticLatents,
-    *,
-    policy: StageMemoryPolicy,
-    include_footprint: bool,
-    progress: Callable[[int, int], None] | None,
-    cancelled: Callable[[], bool] | None,
-) -> tuple[Waveform, StageMemoryReport]:
-    session = StageSession(
-        "decode",
-        lambda: load_vocoder(checkpoint),
-        policy=policy,
-        include_footprint=include_footprint,
-    )
-    with session:
-        waveform = decode_latent_chunks(
-            session.require_model(),
-            acoustic,
-            progress=progress,
-            cancelled=cancelled,
-        )
-        session.handoff(waveform.samples)
-    if session.report is None:
-        raise RuntimeError("Decode stage did not produce a memory report")
-    return waveform, session.report
-
-
 def _generate(
     checkpoint: Path,
     manifest: CheckpointManifest,
@@ -351,7 +206,7 @@ def _generate(
     else:
         prompt = tokenizer.encode_prompt(request.caption, request.lyrics)
         started = time.perf_counter()
-        autoregressive, report = _run_autoregressive_stage(
+        autoregressive, report = run_autoregressive_stage(
             checkpoint,
             prompt,
             autoregressive_config,
@@ -393,7 +248,7 @@ def _generate(
     else:
         started = time.perf_counter()
         if checkpoint_store is None:
-            acoustic, report = _run_acoustic_stage(
+            acoustic, report = run_acoustic_stage(
                 checkpoint,
                 frame_hiddens,
                 seed=request.seed,
@@ -413,7 +268,7 @@ def _generate(
                     next_condition=completed.next_condition,
                 )
 
-            acoustic, report = _run_acoustic_stage(
+            acoustic, report = run_acoustic_stage(
                 checkpoint,
                 frame_hiddens,
                 seed=request.seed,
@@ -432,7 +287,7 @@ def _generate(
     del frame_hiddens
 
     started = time.perf_counter()
-    waveform, report = _run_decode_stage(
+    waveform, report = run_decode_stage(
         checkpoint,
         acoustic,
         policy=memory_policy,
@@ -504,7 +359,7 @@ class Music3Pipeline:
             checkpoint,
             verify_digests=verify_digests,
         )
-        if flow_compute_dtype not in _FLOW_COMPUTE_DTYPES:
+        if flow_compute_dtype not in FLOW_COMPUTE_DTYPES:
             raise ValueError(
                 "flow_compute_dtype must be 'float32' or 'float16'"
             )

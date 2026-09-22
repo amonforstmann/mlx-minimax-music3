@@ -17,6 +17,10 @@ from mlx_minimax_music3 import (
     instrumental_lyrics,
 )
 
+# The house limit for one source file. Nothing else enforced it, so pipeline.py
+# grew to 620 lines before anyone noticed (sonido-studio#26).
+MAX_MODULE_LINES = 500
+
 
 def test_package_version() -> None:
     assert __version__ == "0.0.1a0"
@@ -48,6 +52,18 @@ def test_runtime_imports_are_stdlib_or_mlx_only() -> None:
             unexpected[path.as_posix()] = forbidden
 
     assert not unexpected
+
+
+def test_runtime_modules_stay_under_the_line_limit() -> None:
+    source_root = Path("src/mlx_minimax_music3")
+    oversized = {
+        path.as_posix(): line_count
+        for path in sorted(source_root.rglob("*.py"))
+        if (line_count := len(path.read_text(encoding="utf-8").splitlines()))
+        > MAX_MODULE_LINES
+    }
+
+    assert not oversized
 
 
 def test_mlx_is_the_only_runtime_dependency() -> None:

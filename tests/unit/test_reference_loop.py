@@ -2,62 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass
-
 import mlx.core as mx
 import pytest
 
 from mlx_minimax_music3 import autoregressive
 from mlx_minimax_music3.autoregressive import AR_TOP_K, generate_autoregressive
-from mlx_minimax_music3.prompting import SEMANTIC_VOCAB_SIZE
 from mlx_minimax_music3.reference import (
     ReferenceCodes,
     ReferenceMode,
     ReferenceQualityWarning,
 )
-from mlx_minimax_music3.sampling import sample_top_k
 from tests.support.tiny_autoregressive import (
-    NUM_CODEBOOKS,
+    DrawRecorder,
     build_tiny_models,
     fixed_length_config,
     tiny_prompt,
 )
-
-_C0_COLUMNS = 1 + SEMANTIC_VOCAB_SIZE
-
-
-@dataclass(frozen=True, slots=True)
-class _SemanticDraw:
-    """One recorded c0 draw: its sampling width and its reachable columns."""
-
-    top_k: int
-    columns: tuple[int, ...]
-
-
-class _DrawRecorder:
-    """Record every sampler draw the loop makes, keyed by loop frame."""
-
-    def __init__(self) -> None:
-        self.semantic: dict[int, _SemanticDraw] = {}
-        self.residual_frames: set[int] = set()
-
-    def __call__(
-        self, logits: mx.array, *, top_k: int, seed: int, position: int
-    ) -> mx.array:
-        frame = position // NUM_CODEBOOKS
-        if logits.shape[-1] == _C0_COLUMNS:
-            mx.eval(logits)
-            self.semantic[frame] = _SemanticDraw(
-                top_k,
-                tuple(
-                    column
-                    for column, value in enumerate(logits[0].tolist())
-                    if value != float("-inf")
-                ),
-            )
-        else:
-            self.residual_frames.add(frame)
-        return sample_top_k(logits, top_k=top_k, seed=seed, position=position)
 
 
 def test_cover_reference_forces_the_semantic_code_on_every_frame() -> None:
@@ -88,7 +48,7 @@ def test_reference_shorter_than_the_request_frees_the_remaining_frames() -> None
         max_position_embeddings=64,
     )
     codes = (5_000, 5_001)
-    recorder = _DrawRecorder()
+    recorder = DrawRecorder()
 
     result = generate_autoregressive(
         language_model,
@@ -151,7 +111,7 @@ def test_guidance_biases_the_candidates_only_on_interval_frames() -> None:
     candidates = [
         (code, code + 1, code + 2) for code in (100, 200, 300, 400, 500, 600)
     ]
-    recorder = _DrawRecorder()
+    recorder = DrawRecorder()
 
     generate_autoregressive(
         language_model,
@@ -177,7 +137,8 @@ def test_guidance_biases_the_candidates_only_on_interval_frames() -> None:
         # guidance biases the draw instead of replacing it.
         assert {code + 1 for code in frame_candidates} <= columns
         assert len(columns) > len(frame_candidates)
-        assert draw.top_k == AR_TOP_K + len(frame_candidates)
+        # The draw is sized to every reachable column, so the sampler cuts none.
+        assert draw.top_k == len(columns)
     assert all(
         recorder.semantic[frame].top_k == AR_TOP_K for frame in (0, 2, 3, 5, 6)
     )
@@ -191,7 +152,7 @@ def test_continue_prefix_is_context_and_stays_out_of_the_result() -> None:
     prefix = ReferenceCodes.from_code_frames(
         [[1_234, 1, 2, 3], [2_345, 4, 5, 6], [3_456, 7, 8, 9]]
     )
-    recorder = _DrawRecorder()
+    recorder = DrawRecorder()
 
     result = generate_autoregressive(
         language_model,
@@ -268,7 +229,7 @@ def test_continue_from_semantic_codes_warns_and_resynthesizes_residuals() -> Non
         head_seed=17,
         max_position_embeddings=64,
     )
-    recorder = _DrawRecorder()
+    recorder = DrawRecorder()
 
     with pytest.warns(ReferenceQualityWarning, match="resynthesizes"):
         result = generate_autoregressive(

@@ -11,13 +11,14 @@ from typing import Any
 
 import mlx.core as mx
 
+from . import reference
 from .acoustic import AcousticResumeState, LatentChunk
 from .autoregressive import AutoregressiveConfig, AutoregressiveResult
 from .chunking import ChunkWindow, chunk_windows
 from .manifest import CheckpointManifest, sha256_file
 
 SCHEMA_VERSION = 1
-BEHAVIOR_VERSION = "music3-resume-v1"
+BEHAVIOR_VERSION = "music3-resume-v2"
 _CACHE_ERRORS = (OSError, RuntimeError, ValueError, TypeError, KeyError)
 
 
@@ -52,6 +53,9 @@ def generation_fingerprint(
     payload = {
         "schema_version": SCHEMA_VERSION,
         "behavior_version": BEHAVIOR_VERSION,
+        # Read at call time so a recalibrated penalty invalidates guided
+        # checkpoints without a behavior-version bump.
+        "guidance_logit_penalty": reference.GUIDANCE_LOGIT_PENALTY,
         "request": asdict(request),
         "flow_compute_dtype": flow_compute_dtype,
         "model": _model_identity(model_manifest),

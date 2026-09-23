@@ -125,9 +125,12 @@ request = GenerationRequest(
     audio_duration=10.0,
     reference_codes=ReferenceCodes.from_code_frames(codes),
     reference_mode=ReferenceMode.GUIDANCE,
-    reference_interval=4,
+    reference_interval=1,
 )
 ```
+
+The example guides every frame, because guidance at a longer interval steers
+weakly.
 
 | Constructor | Input | Modes |
 |---|---|---|
@@ -146,6 +149,12 @@ the stream free-run. `reference_interval` accepts 1 through 10 and applies only 
 `GUIDANCE`. The other modes reject a non-default interval. Without
 `reference_codes` the request is text-only and generation is unchanged for the same
 seed.
+
+At interval 4 and the released penalty, guided frames on the selective-q8
+checkpoint followed 24 % of plausible references, 13 % of implausible ones, and
+49.5 % of an encoded track's candidates. A penalty of 20 raised plausible and
+implausible frames alike to 52 %. At interval 1 the same sweep followed 97 %, 24 %,
+and 93 %. The sweep covers 8 s intros, two prompts, and two seeds each.
 
 `GUIDANCE` and `COVER` emit the frames they steer, so `audio_duration` covers the
 reference window and the free frames together. A reference longer than that

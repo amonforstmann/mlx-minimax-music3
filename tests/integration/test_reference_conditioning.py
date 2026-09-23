@@ -137,8 +137,8 @@ def test_guidance_displaces_guided_and_free_frames_when_the_bias_wins(
 
     assert emitted != captured
     # Steering one frame changes the history every later frame reads, so the free
-    # frames move too. Their own draw is still greedy until the ascending-topk
-    # defect (issue #24) is fixed, so this checks displacement, not diversity.
+    # frames move too. A free frame draws from its whole top-k window with the
+    # baseline's seed and position, so a changed code there comes from the history.
     assert any(emitted[frame] != captured[frame] for frame in free_frames)
     assert sum(1 for frame in guided_frames if emitted[frame] == foreign[frame]) > 0
 

@@ -34,12 +34,20 @@ MIN_REFERENCE_INTERVAL = 1
 MAX_REFERENCE_INTERVAL = 10
 # Logit units subtracted from every non-candidate column on a guided frame, which
 # leaves a non-candidate code reachable and keeps GUIDANCE distinct from COVER.
-# Calibrated on the selective-q8 checkpoint over 100 frames and 25 guided frames,
-# against a reference captured from a different prompt (plausible to the model) and
-# a reference shifted by 4,096 codes (implausible). Guided frames that followed the
-# reference: 8 units gave 8 of 25 plausible and 0 of 25 implausible, 16 gave 22 and
-# 1, 24 gave 24 and 13, 32 gave 25 and 17. The value below follows a plausible
-# reference while still refusing an implausible one. Listening validation has not
+# Calibrated with dev/verify_reference_conditioning.py on the selective-q8
+# checkpoint at interval 1, over two prompts, two seeds each, and 8 s intros.
+# Each reference gets 800 guided frames. The plausible one is the other prompt's
+# baseline semantic stream, and the implausible one is the baseline shifted by
+# 4,096 codes. The encoded one is one recorded track with five candidates per
+# frame. Frames that followed the plausible, implausible, and encoded reference:
+# 8 units 43/5/55, 12 units 201/31/565, 13 units 408/75/678, 14 units 676/129/642,
+# 15 units 776/134/683, 16 units 778/192/747, 20 units 791/619/769, 24 units
+# 800/787/797, and 32 units 800/799/800. No value met the rule set before the
+# sweep, at least 80 % plausible and at most 10 % implausible. Frames within a
+# run are correlated, and the runs do not separate 15 from 16. Each difference
+# between those two comes from one or two runs, and the encoded stream favours
+# 16. The data does not justify changing the released value. The sample is
+# limited to 8 s intros, one recorded track, and q8. Listening validation has not
 # been done.
 GUIDANCE_LOGIT_PENALTY = 16.0
 

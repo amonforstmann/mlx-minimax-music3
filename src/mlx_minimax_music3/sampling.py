@@ -140,6 +140,20 @@ def sanitize_logits(logits: mx.array) -> mx.array:
     return mx.where(values == -mx.inf, mx.array(-1e9, mx.float32), values)
 
 
+def kth_largest(values: mx.array, k: int) -> mx.array:
+    """Return the kth largest value along the last axis, keeping that axis.
+
+    `mx.topk` returns the k largest values in no specified order, so no fixed
+    position of its output holds the kth largest. Their minimum does.
+    """
+
+    if values.ndim < 1:
+        raise ValueError("values must have at least one dimension")
+    if not 0 < k <= values.shape[-1]:
+        raise ValueError(f"k must be in [1, {values.shape[-1]}]")
+    return mx.topk(values, k=k, axis=-1).min(axis=-1, keepdims=True)
+
+
 def restrict_top_k(logits: mx.array, top_k: int) -> mx.array:
     """Mask every value below the kth largest logit."""
 
@@ -149,7 +163,7 @@ def restrict_top_k(logits: mx.array, top_k: int) -> mx.array:
         raise ValueError(f"top_k must be in [1, {logits.shape[-1]}]")
     if top_k == logits.shape[-1]:
         return logits
-    threshold = mx.topk(logits, k=top_k, axis=-1)[..., -1:]
+    threshold = kth_largest(logits, top_k)
     return mx.where(logits < threshold, -mx.inf, logits)
 
 
@@ -167,7 +181,11 @@ def sample_top_k(
     seed: int,
     position: int,
 ) -> mx.array:
-    """Sample one row with SGLang's deterministic top-k Gumbel-max rule."""
+    """Sample one row with SGLang's deterministic top-k Gumbel-max rule.
+
+    Every column at or above the `top_k`-th largest value is a candidate, so a tie
+    at that value can draw from more than `top_k` columns.
+    """
 
     if logits.ndim != 2 or logits.shape[0] != 1:
         raise ValueError("reference sampling expects logits with shape [1, vocab]")
@@ -176,11 +194,19 @@ def sample_top_k(
     values = sanitize_logits(logits)
     if top_k == values.shape[-1]:
         candidate_indices = mx.arange(values.shape[-1], dtype=mx.int32)
+        candidate_logits = values[0, candidate_indices]
     else:
-        candidate_indices = mx.argpartition(values, kth=-top_k, axis=-1)[
-            0, -top_k:
-        ].astype(mx.int32)
-    candidate_logits = values[0, candidate_indices]
+        row = values[0]
+        # The candidates are the largest values, so they fill the tail of the
+        # ascending order whatever order it gives tied columns.
+        order = mx.argsort(row)
+        candidate_count = (row >= kth_largest(row, top_k)).sum()
+        mx.eval(row, order, candidate_count)
+        # The count is known only after that evaluation. Slicing the evaluated
+        # arrays on the CPU stream avoids a second GPU round trip per draw.
+        with mx.stream(mx.cpu):
+            candidate_indices = order[-candidate_count.item() :].astype(mx.int32)
+            candidate_logits = row[candidate_indices]
     mx.eval(candidate_indices, candidate_logits)
 
     candidates = sorted(

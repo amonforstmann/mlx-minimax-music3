@@ -49,8 +49,9 @@ the requested duration and needs every codebook: a semantic-only stream makes th
 depth decoder resynthesize the residual codes, which is reported as a quality
 warning. Because the prefix is context, the requested duration always counts new
 frames. Each prefix frame costs one evaluated language-model step, about 32 ms on
-the selective-q8 checkpoint. The loop reports progress after each evaluated prefix
-frame: `prefilled_frames` counts up to `prefix_frames` and `completed_frames` stays
+the selective-q8 checkpoint. The autoregressive runner reports the prefill at zero
+frames before it loads the language model, and the loop then reports after each
+evaluated prefix frame: `prefilled_frames` counts up to `prefix_frames` and `completed_frames` stays
 zero. Generated-frame reports, including the one a restored stage sends, keep
 `prefilled_frames` equal to `prefix_frames`. Both fields are zero without a prefix.
 

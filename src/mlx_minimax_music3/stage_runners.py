@@ -92,6 +92,19 @@ def run_autoregressive_stage(
     progress: Callable[[GenerationProgress], None] | None,
     cancelled: Callable[[], bool] | None,
 ) -> tuple[AutoregressiveResult, StageMemoryReport]:
+    if progress is not None and config.prefix_frames:
+        # Loading the language model and evaluating the prompt take seconds
+        # before the first prefix frame reports. This report marks the prefill
+        # as it starts. A restored generation skips this stage and prefills
+        # nothing, so it never sends one.
+        progress(
+            GenerationProgress(
+                completed_frames=0,
+                maximum_frames=config.max_frames,
+                prefilled_frames=0,
+                prefix_frames=config.prefix_frames,
+            )
+        )
     session = StageSession(
         "autoregressive",
         lambda: _load_autoregressive_models(checkpoint),

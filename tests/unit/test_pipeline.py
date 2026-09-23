@@ -14,7 +14,11 @@ from mlx_minimax_music3.acoustic import (
     FlowGenerationConfig,
     LatentChunk,
 )
-from mlx_minimax_music3.autoregressive import AutoregressiveResult
+from mlx_minimax_music3.autoregressive import (
+    AutoregressiveConfig,
+    AutoregressiveResult,
+    GenerationProgress,
+)
 from mlx_minimax_music3.chunking import ChunkWindow
 from mlx_minimax_music3.decoding import Waveform
 from mlx_minimax_music3.manifest import CheckpointManifest, ComponentManifest
@@ -385,4 +389,66 @@ def test_acoustic_runner_forwards_resume_and_window_callback(
 
     assert received["resume"] is resume
     assert received["window_completed"] is on_window
+
+
+def _record_autoregressive_stage(
+    monkeypatch: pytest.MonkeyPatch, config: AutoregressiveConfig
+) -> list[object]:
+    """Run the autoregressive runner with stubs; return progress and load order."""
+    order: list[object] = []
+
+    def load(checkpoint: Path):
+        order.append("load")
+        return stage_runners._AutoregressiveModels(None, None)
+
+    def generate(*args, **kwargs):
+        order.append("generate")
+        return AutoregressiveResult(
+            codes=mx.zeros((1, 1, 8), dtype=mx.int32),
+            frame_hiddens=mx.zeros((1, 1, 32), dtype=mx.bfloat16),
+            stopped_on_audio_end=False,
+        )
+
+    monkeypatch.setattr(stage_runners, "_load_autoregressive_models", load)
+    monkeypatch.setattr(stage_runners, "generate_autoregressive", generate)
+    stage_runners.run_autoregressive_stage(
+        Path("unused"),
+        TokenizedPrompt((1, 2), (1, 2)),
+        config,
+        policy=StageMemoryPolicy(),
+        include_footprint=False,
+        progress=order.append,
+        cancelled=None,
+    )
+    return order
+
+
+def test_autoregressive_runner_reports_an_empty_prefill_before_the_load(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression for amonforstmann/sonido-studio#54: the load and the prompt
+    # evaluation take seconds before the first prefix frame reports.
+    config = AutoregressiveConfig(
+        audio_duration=1.0,
+        reference_codes=ReferenceCodes.from_code_frames([[1, 2, 3, 4]] * 3),
+        reference_mode=ReferenceMode.CONTINUE,
+    )
+
+    order = _record_autoregressive_stage(monkeypatch, config)
+
+    assert order == [
+        GenerationProgress(0, config.max_frames, 0, 3),
+        "load",
+        "generate",
+    ]
+
+
+def test_autoregressive_runner_reports_nothing_before_the_load_without_a_prefix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    order = _record_autoregressive_stage(
+        monkeypatch, AutoregressiveConfig(audio_duration=1.0)
+    )
+
+    assert order == ["load", "generate"]
 

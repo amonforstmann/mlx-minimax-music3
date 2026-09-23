@@ -64,3 +64,10 @@ All notable project changes are documented here.
   penalty 16, guided frames follow 24 % of plausible, 13 % of implausible, and
   49.5 % of encoded-stream references. At penalty 20, plausible and implausible
   both reach 52 %.
+- Report progress during a `CONTINUE` prefill. A 1,500-frame prefix took about
+  47 s on the selective-q8 checkpoint without a report. `GenerationProgress` gains
+  `prefilled_frames` and `prefix_frames`, both zero by default. Each evaluated
+  prefix frame reports `completed_frames=0` and the prefix frames evaluated so
+  far. Generated-frame reports have `prefilled_frames` equal to `prefix_frames`. A
+  caller that reads only `completed_frames` receives one report at zero per prefix
+  frame.

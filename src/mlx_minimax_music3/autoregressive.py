@@ -103,6 +103,17 @@ class AutoregressiveConfig:
         return frames
 
     @property
+    def prefix_frames(self) -> int:
+        """Return the reference frames prefilled before the first emitted frame.
+
+        Only a `CONTINUE` reference has a prefix. The count is zero without a
+        reference and for `GUIDANCE` and `COVER`.
+        """
+
+        plan = self.reference_plan
+        return 0 if plan is None else plan.prefix_frames
+
+    @property
     def min_frames(self) -> int:
         """Return the number of frames protected from early stopping."""
 
@@ -114,10 +125,18 @@ class AutoregressiveConfig:
 
 @dataclass(frozen=True, slots=True)
 class GenerationProgress:
-    """Progress emitted only at safe completed-frame boundaries."""
+    """Progress emitted only at safe frame boundaries.
+
+    A `CONTINUE` prefix reports first: `prefilled_frames` counts up to
+    `prefix_frames` while `completed_frames` stays zero. Every generated-frame
+    report has `prefilled_frames == prefix_frames`, and both are zero without a
+    prefix.
+    """
 
     completed_frames: int
     maximum_frames: int
+    prefilled_frames: int = 0
+    prefix_frames: int = 0
 
 
 @dataclass(frozen=True, slots=True)
@@ -282,7 +301,6 @@ def generate_autoregressive(
 
     max_frames = config.max_frames
     plan = config.reference_plan
-    prefix_frames = 0
     if plan is not None:
         validate_reference_stream(
             plan,
@@ -291,7 +309,7 @@ def generate_autoregressive(
             max_frames=max_frames,
             top_k=config.top_k,
         )
-        prefix_frames = plan.prefix_frames
+    prefix_frames = config.prefix_frames
 
     text_ids = mx.array(prompt.rows(), dtype=mx.int32)
     cache = language_model.make_cache(
@@ -335,6 +353,15 @@ def generate_autoregressive(
             # that is evaluated at the first emitted frame. Every layer's cache
             # write is an input of this hidden state, so one eval covers it.
             mx.eval(last_hidden)
+            if progress is not None:
+                progress(
+                    GenerationProgress(
+                        completed_frames=0,
+                        maximum_frames=max_frames,
+                        prefilled_frames=reference_index + 1,
+                        prefix_frames=prefix_frames,
+                    )
+                )
             continue
 
         semantic_token = _sample_semantic_code(
@@ -372,7 +399,14 @@ def generate_autoregressive(
             frame_hidden = mx.concatenate((last_hidden[:1], depth_hiddens), axis=-1)
             frames.append(codes, frame_hidden)
             if progress is not None:
-                progress(GenerationProgress(frames.count, max_frames))
+                progress(
+                    GenerationProgress(
+                        completed_frames=frames.count,
+                        maximum_frames=max_frames,
+                        prefilled_frames=prefix_frames,
+                        prefix_frames=prefix_frames,
+                    )
+                )
             if frames.count >= max_frames:
                 break
 

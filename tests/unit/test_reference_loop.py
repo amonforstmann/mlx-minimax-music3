@@ -6,7 +6,11 @@ import mlx.core as mx
 import pytest
 
 from mlx_minimax_music3 import autoregressive
-from mlx_minimax_music3.autoregressive import AR_TOP_K, generate_autoregressive
+from mlx_minimax_music3.autoregressive import (
+    AR_TOP_K,
+    GenerationProgress,
+    generate_autoregressive,
+)
 from mlx_minimax_music3.reference import (
     ReferenceCodes,
     ReferenceMode,
@@ -222,6 +226,73 @@ def test_continue_prefill_evaluates_every_prefix_frame(monkeypatch) -> None:
     # code, so an evaluation after each of their feeds is what bounds the graph.
     assert len(evaluations_after_feed) >= 1 + prefix_frames
     assert 0 not in evaluations_after_feed[1 : prefix_frames + 1]
+
+
+def test_continue_prefill_reports_progress_for_every_prefix_frame() -> None:
+    # Regression for amonforstmann/sonido-studio#54: a 1,500-frame prefix ran for
+    # about 47 s on selective q8 without a progress report.
+    language_model, decoder = build_tiny_models(
+        head_seed=17,
+        max_position_embeddings=64,
+    )
+    prefix = ReferenceCodes.from_code_frames(
+        [[1_000 + frame, 1, 2, 3] for frame in range(3)]
+    )
+    events: list[GenerationProgress] = []
+
+    generate_autoregressive(
+        language_model,
+        decoder,
+        tiny_prompt(),
+        fixed_length_config(
+            2,
+            reference_codes=prefix,
+            reference_mode=ReferenceMode.CONTINUE,
+        ),
+        progress=events.append,
+    )
+
+    assert events == [
+        GenerationProgress(0, 2, prefilled_frames=1, prefix_frames=3),
+        GenerationProgress(0, 2, prefilled_frames=2, prefix_frames=3),
+        GenerationProgress(0, 2, prefilled_frames=3, prefix_frames=3),
+        GenerationProgress(1, 2, prefilled_frames=3, prefix_frames=3),
+        GenerationProgress(2, 2, prefilled_frames=3, prefix_frames=3),
+    ]
+
+
+@pytest.mark.parametrize(
+    "reference_mode",
+    [ReferenceMode.GUIDANCE, ReferenceMode.COVER],
+)
+def test_steering_reference_reports_an_empty_prefix(
+    reference_mode: ReferenceMode,
+) -> None:
+    language_model, decoder = build_tiny_models(
+        head_seed=17,
+        max_position_embeddings=64,
+    )
+    events: list[GenerationProgress] = []
+
+    generate_autoregressive(
+        language_model,
+        decoder,
+        tiny_prompt(),
+        fixed_length_config(
+            3,
+            reference_codes=ReferenceCodes.from_code_frames(
+                [[1_000 + frame, 1, 2, 3] for frame in range(3)]
+            ),
+            reference_mode=reference_mode,
+        ),
+        progress=events.append,
+    )
+
+    assert events == [
+        GenerationProgress(1, 3, prefilled_frames=0, prefix_frames=0),
+        GenerationProgress(2, 3, prefilled_frames=0, prefix_frames=0),
+        GenerationProgress(3, 3, prefilled_frames=0, prefix_frames=0),
+    ]
 
 
 def test_continue_from_semantic_codes_warns_and_resynthesizes_residuals() -> None:

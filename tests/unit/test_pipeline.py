@@ -18,6 +18,7 @@ from mlx_minimax_music3.autoregressive import AutoregressiveResult
 from mlx_minimax_music3.chunking import ChunkWindow
 from mlx_minimax_music3.decoding import Waveform
 from mlx_minimax_music3.manifest import CheckpointManifest, ComponentManifest
+from mlx_minimax_music3.reference import ReferenceCodes, ReferenceMode
 from mlx_minimax_music3.stages import StageMemoryPolicy
 from mlx_minimax_music3.tokenizer import TokenizedPrompt
 
@@ -212,9 +213,25 @@ def test_generation_request_builds_validated_stage_configs() -> None:
 
 
 @pytest.mark.usefixtures("isolated_stage_memory")
+@pytest.mark.parametrize(
+    ("reference", "prefix_frames"),
+    [
+        ({}, 0),
+        (
+            {
+                "reference_codes": ReferenceCodes.from_semantic_codes((5, 6)),
+                "reference_mode": ReferenceMode.CONTINUE,
+            },
+            2,
+        ),
+    ],
+    ids=["text-only", "continue"],
+)
 def test_restored_stages_report_defined_metadata_and_progress(
     tmp_path: Path,
     monkeypatch,
+    reference: dict[str, object],
+    prefix_frames: int,
 ) -> None:
     checkpoint = tmp_path / "model"
     checkpoint.mkdir()
@@ -280,6 +297,7 @@ def test_restored_stages_report_defined_metadata_and_progress(
         lyrics="lyrics",
         audio_duration=11.0,
         seed=7,
+        **reference,
     )
     cache = tmp_path / "checkpoints"
     pipeline._run_pipeline(
@@ -319,6 +337,8 @@ def test_restored_stages_report_defined_metadata_and_progress(
     ]
     assert [report.label for report in result.metadata.memory_reports] == ["decode"]
     assert ar_progress[-1].completed_frames == 250
+    assert ar_progress[-1].prefilled_frames == prefix_frames
+    assert ar_progress[-1].prefix_frames == prefix_frames
     assert [sample.chunk_index for sample in flow_progress] == [0, 1]
     assert all(sample.step == request.flow_steps for sample in flow_progress)
 

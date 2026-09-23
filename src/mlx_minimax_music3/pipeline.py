@@ -197,10 +197,13 @@ def _generate(
         autoregressive = restored.autoregressive
         timings.append(StageTiming("autoregressive", 0.0))
         if autoregressive_progress is not None:
+            prefix_frames = autoregressive_config.prefix_frames
             autoregressive_progress(
                 GenerationProgress(
                     completed_frames=autoregressive.num_frames,
                     maximum_frames=autoregressive_config.max_frames,
+                    prefilled_frames=prefix_frames,
+                    prefix_frames=prefix_frames,
                 )
             )
     else:

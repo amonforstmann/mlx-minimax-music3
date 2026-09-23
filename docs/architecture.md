@@ -47,7 +47,8 @@ A `CONTINUE` prefix never enters the result. It extends the key-value cache beyo
 the requested duration and needs every codebook: a semantic-only stream makes the
 depth decoder resynthesize the residual codes, which is reported as a quality
 warning. Because the prefix is context, the requested duration always counts new
-frames.
+frames. Each prefix frame costs one evaluated language-model step, about 32 ms on
+the selective-q8 checkpoint, and progress reports start only after the prefix.
 
 A live reference window masks the stop token, so the model cannot end the song
 before or inside the reference. Two limits remain. A reference longer than the

@@ -33,3 +33,6 @@ All notable project changes are documented here.
   A live reference window masks the audio-end token. A text-only request keeps its
   previous output for the same seed.
 - Enforce the 500-line limit on runtime modules in the unit tests.
+- Evaluate each `CONTINUE` prefix frame as it is prefilled. A long prefix no
+  longer builds one lazy graph that is first evaluated at the first generated
+  frame and exhausts unified memory.

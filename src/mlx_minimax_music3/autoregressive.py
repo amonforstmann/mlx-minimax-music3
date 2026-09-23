@@ -333,6 +333,12 @@ def generate_autoregressive(
                 sampler=sampler,
             )
             last_hidden = advance_frame(language_model, decoder, codes, cache)
+            # A prefix frame draws no semantic code, so no `.item()` evaluates it,
+            # and a custom sampler need not evaluate its residual draws either.
+            # Left lazy, the whole prefix and its key-value writes form one graph
+            # that is evaluated at the first emitted frame. Every layer's cache
+            # write is an input of this hidden state, so one eval covers it.
+            mx.eval(last_hidden)
             continue
 
         semantic_token = _sample_semantic_code(

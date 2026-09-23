@@ -7,6 +7,7 @@ from dataclasses import dataclass
 import mlx.core as mx
 import pytest
 
+from mlx_minimax_music3 import autoregressive
 from mlx_minimax_music3.autoregressive import AR_TOP_K, generate_autoregressive
 from mlx_minimax_music3.prompting import SEMANTIC_VOCAB_SIZE
 from mlx_minimax_music3.reference import (
@@ -210,6 +211,56 @@ def test_continue_prefix_is_context_and_stays_out_of_the_result() -> None:
     # semantic code and no residual codes.
     assert sorted(recorder.semantic) == [0, 4, 5, 6, 7]
     assert recorder.residual_frames == {0, 4, 5, 6, 7}
+
+
+def test_continue_prefill_evaluates_every_prefix_frame(monkeypatch) -> None:
+    # Regression for amonforstmann/sonido-studio#17: an unevaluated prefill
+    # chained a 1,500-frame prefix and its key-value writes into one lazy graph
+    # that exhausted unified memory before the first emitted frame.
+    language_model, decoder = build_tiny_models(
+        head_seed=17,
+        max_position_embeddings=64,
+    )
+    prefix_frames = 8
+    prefix = ReferenceCodes.from_code_frames(
+        [[1_000 + frame, 1, 2, 3] for frame in range(prefix_frames)]
+    )
+    evaluate = mx.eval
+    feed = autoregressive.advance_frame
+    fed_hiddens: list[mx.array] = []
+    evaluations_after_feed: list[int] = []
+
+    def recording_eval(*arrays):
+        # Count only evaluations of the hidden state the last feed returned,
+        # because every key-value write is an input of that array.
+        if fed_hiddens and any(array is fed_hiddens[-1] for array in arrays):
+            evaluations_after_feed[-1] += 1
+        return evaluate(*arrays)
+
+    def recording_feed(*args, **kwargs):
+        hidden = feed(*args, **kwargs)
+        fed_hiddens.append(hidden)
+        evaluations_after_feed.append(0)
+        return hidden
+
+    monkeypatch.setattr(mx, "eval", recording_eval)
+    monkeypatch.setattr(autoregressive, "advance_frame", recording_feed)
+
+    generate_autoregressive(
+        language_model,
+        decoder,
+        tiny_prompt(),
+        fixed_length_config(
+            2,
+            reference_codes=prefix,
+            reference_mode=ReferenceMode.CONTINUE,
+        ),
+    )
+
+    # Feed zero is the <|audio_start|> feedback frame. The prefix frames draw no
+    # code, so an evaluation after each of their feeds is what bounds the graph.
+    assert len(evaluations_after_feed) >= 1 + prefix_frames
+    assert 0 not in evaluations_after_feed[1 : prefix_frames + 1]
 
 
 def test_continue_from_semantic_codes_warns_and_resynthesizes_residuals() -> None:

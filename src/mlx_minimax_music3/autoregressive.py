@@ -33,6 +33,7 @@ from .sampling import (
     Sampler,
     SeedSchedule,
     classifier_free_guidance,
+    kth_largest,
     sample_top_k,
 )
 from .tokenizer import TokenizedPrompt
@@ -225,25 +226,20 @@ def _sample_semantic_code(
         guided = cover_logits(guided, reference.candidates)
         draw_top_k = len(reference.candidates)
     else:
+        # SGLang ranks the window by the conditional logits and draws from it by
+        # the guided values.
         conditional = allowed_logits[:1]
-        window = mx.where(
-            conditional
-            < mx.topk(
-                conditional,
-                k=min(top_k, conditional.shape[-1]),
-                axis=-1,
-            )[..., -1:],
-            -mx.inf,
-            guided,
-        )
+        threshold = kth_largest(conditional, min(top_k, columns))
+        window = mx.where(conditional < threshold, -mx.inf, guided)
         if reference is None:
             guided = window
             draw_top_k = min(top_k, columns)
         else:
-            # The draw spans the model's window plus every candidate, so no
-            # reference code is dropped before the sampler sees it.
+            # A tie can widen the window beyond top_k, so the draw is sized to
+            # every reachable column and no window column or reference code is
+            # dropped before the sampler sees it.
             guided = guidance_logits(guided, window, reference.candidates)
-            draw_top_k = min(columns, top_k + len(reference.candidates))
+            draw_top_k = int(mx.isfinite(guided).sum().item())
     local_index = sampler(
         guided,
         top_k=draw_top_k,

@@ -40,8 +40,9 @@ as context before the first emitted frame, then frees the loop.
 
 Under `GUIDANCE` and `COVER`, residual codebooks and hidden states are
 model-generated, so the acoustic stage receives the conditioning it receives for a
-text-only request. A steered draw covers the model's own top-k window plus every
-reference candidate, so a candidate outside that window is still reachable.
+text-only request. A guided draw covers the model's own top-k window plus every
+reference candidate, so a candidate outside that window is still reachable. A
+covered draw reaches the reference code alone.
 
 A `CONTINUE` prefix never enters the result. It extends the key-value cache beyond
 the requested duration and needs every codebook: a semantic-only stream makes the
@@ -202,7 +203,14 @@ precision from a directory name and never quantizes weights during inference.
 | `dense` | Correctness and parity baseline | Language model and RVQ at published BF16; acoustic components and solver at published FP32 |
 | `q8` | Experimental memory profile | Allowlisted MLX affine 8-bit linear layers; not accepted for release quality until long-sequence sampling passes |
 
-Sampling logits, classifier-free guidance, and top-k filtering use FP32.
+Sampling logits, classifier-free guidance, and top-k filtering use FP32. Both
+top-k cuts keep ties, as SGLang's `apply_cfg` and `sample_topk_seeded` do. The
+semantic window keeps every column whose conditional logit reaches the `top_k`-th
+largest conditional logit. The draw keeps every window column whose guided logit
+reaches the `top_k`-th largest guided logit in the window. A residual codebook
+keeps every column whose guided logit reaches its `top_k`-th largest. A tie at any
+of these boundaries widens the cut beyond `top_k` columns. A guided frame draws
+from its whole window plus every reference candidate.
 Reference-compatible categorical draws use the SGLang request-seed derivation,
 MurmurHash32 column noise, and FP64 Gumbel-max scoring. Flow integration and
 waveform clamping use FP32 even when their inputs come from a lower-precision

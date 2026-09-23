@@ -36,3 +36,31 @@ All notable project changes are documented here.
 - Evaluate each `CONTINUE` prefix frame as it is prefilled. A long prefix no
   longer builds one lazy graph that is first evaluated at the first generated
   frame and exhausts unified memory.
+- Fix the semantic top-k window, which kept only the conditional argmax and the
+  codes tied with it, because `mx.topk` does not return its values in sorted
+  order. `top_k` and the CFG scale now shape the c0 draw, so a request draws
+  different c0 codes than before for the same seed. `restrict_top_k` uses the same
+  order-independent threshold. Generation checkpoints move to behavior version
+  `music3-resume-v2`, so a checkpoint written by the old window is recomputed.
+- Keep every column tied with the `top_k`-th largest value as a candidate of the
+  seeded draw, as SGLang's sampler does. Output changes only where guided or
+  residual logits tie at that boundary. Generation checkpoints stay at behavior
+  version `music3-resume-v2`.
+- Size a guided c0 draw to every reachable column. A tie can widen the model's
+  window beyond `top_k`, and a draw of `top_k` plus the candidate count then
+  dropped window columns or reference candidates before the sampler saw them.
+- Add `GUIDANCE_LOGIT_PENALTY` to the generation fingerprint, so a checkpoint
+  written under another penalty is recomputed without a behavior-version bump.
+- `GUIDANCE_LOGIT_PENALTY` stays at 16 after a sweep against the full window. The
+  sweep guided every frame of 8 s intros on the selective-q8 checkpoint, over two
+  prompts and two seeds each. Of 800 guided frames each, 16 follows 778
+  plausible, 192 implausible, and 747 encoded-stream frames, and 15 follows 776,
+  134, and 683. Frames within a run are correlated, and the runs do not separate
+  the two values. No value from 8 to 32 follows at least 80 % of plausible and at
+  most 10 % of implausible frames. Under the old window, 8, 16, 24, and 32 units
+  followed 8, 22, 24, and 25 of 25 plausible and 0, 1, 13, and 17 of 25
+  implausible guided frames.
+- Guidance at a `reference_interval` above 1 now steers weakly. At interval 4 and
+  penalty 16, guided frames follow 24 % of plausible, 13 % of implausible, and
+  49.5 % of encoded-stream references. At penalty 20, plausible and implausible
+  both reach 52 %.

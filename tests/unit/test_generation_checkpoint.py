@@ -4,7 +4,9 @@ from dataclasses import replace
 from pathlib import Path
 
 import mlx.core as mx
+import pytest
 
+from mlx_minimax_music3 import generation_checkpoint, reference
 from mlx_minimax_music3.acoustic import LatentChunk
 from mlx_minimax_music3.autoregressive import AutoregressiveResult
 from mlx_minimax_music3.chunking import ChunkWindow
@@ -62,6 +64,31 @@ def test_checkpoint_round_trip_skips_completed_autoregressive_stage(
         restored.autoregressive.frame_hiddens, expected.frame_hiddens
     ).item()
     assert restored.autoregressive.stopped_on_audio_end is True
+
+
+def test_checkpoint_from_the_greedy_semantic_sampler_is_not_restored(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Regression for amonforstmann/sonido-studio#24: the c0 draw ignored top_k
+    # before this behavior version, so the same request no longer produces what
+    # such a checkpoint holds.
+    monkeypatch.setattr(generation_checkpoint, "BEHAVIOR_VERSION", "music3-resume-v1")
+    _store(tmp_path).save_autoregressive(
+        AutoregressiveResult(
+            codes=mx.zeros((1, 250, 8), dtype=mx.int32),
+            frame_hiddens=mx.zeros((1, 250, 32), dtype=mx.float32),
+            stopped_on_audio_end=False,
+        )
+    )
+    monkeypatch.undo()
+
+    restored = _store(tmp_path).restore(
+        autoregressive_config=_request().autoregressive_config
+    )
+
+    assert restored.autoregressive is None
+    assert restored.acoustic is None
 
 
 def test_checkpoint_resumes_from_first_missing_acoustic_window(
@@ -149,6 +176,29 @@ def test_reference_conditioning_changes_the_generation_fingerprint() -> None:
     assert generation_fingerprint(text_only, **identity) != generation_fingerprint(
         referenced, **identity
     )
+
+
+def test_guidance_penalty_changes_the_generation_fingerprint(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A recalibrated penalty changes every guided draw, so checkpoints written
+    # under the old value must not be restored.
+    guided = replace(
+        _request(),
+        reference_codes=ReferenceCodes.from_semantic_codes((5, 6)),
+        reference_mode=ReferenceMode.GUIDANCE,
+    )
+    identity = {
+        "flow_compute_dtype": "float32",
+        "model_manifest": _model_manifest(),
+    }
+    released = generation_fingerprint(guided, **identity)
+
+    monkeypatch.setattr(
+        reference, "GUIDANCE_LOGIT_PENALTY", reference.GUIDANCE_LOGIT_PENALTY + 1.0
+    )
+
+    assert generation_fingerprint(guided, **identity) != released
 
 
 def test_inconsistent_autoregressive_stop_state_invalidates_cache(

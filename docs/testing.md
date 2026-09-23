@@ -51,10 +51,22 @@ automatic response to a failing golden assertion.
 Reference conditioning is covered by both tiers with miniature models, the real
 sampler, and the real loop. Miniature logits are far more peaked than the released
 checkpoint's, so the guidance tests pin both ends of the calibrated bias instead of
-asserting the shipped value's behavior. `dev/verify_reference_conditioning.py`
-repeats the comparisons against a local checkpoint when a change touches semantic
-sampling, and it is where the shipped bias was calibrated. It prints a JSON report
-and is run by hand, never from pytest.
+asserting the released value's behavior. A recording sampler pins the width of the
+semantic top-k window on free and guided frames. A null-reference identity test
+cannot do that, because both of its runs share the same window. A miniature model
+whose semantic head rows repeat in groups of four puts a tie on the window
+boundary of every frame, which pins the tie rule of the window and the draw.
+
+`dev/verify_reference_conditioning.py` repeats the comparisons against a local
+checkpoint when a change touches semantic sampling. It prints a JSON report and is
+run by hand, never from pytest. The released bias is calibrated with its sweep:
+`--interval 1 --penalties 8,12,13,14,15,16,20,24,32` guides every frame towards a
+plausible reference, the semantic codes of a baseline rendered from
+`--plausible-caption` and `--plausible-lyrics`, and towards an implausible one,
+the baseline shifted by 4,096 codes. The script defaults to `--interval 4`.
+`--reference-npz` adds an encoder stream saved as int32 `codes` `[frames, 8]` and
+`semantic_candidates` `[frames, k]` arrays; a guided frame follows it when the
+emitted code is one of that frame's candidates.
 
 Listening validation with complete dense or quantized weights is a separate
 release-quality activity. It must not be represented as a pytest pass/fail check

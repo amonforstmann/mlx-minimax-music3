@@ -5,6 +5,7 @@ import pytest
 
 from mlx_minimax_music3.autoregressive import (
     AutoregressiveConfig,
+    GenerationProgress,
     _restricted_semantic_logits,
     generate_autoregressive,
 )
@@ -76,6 +77,41 @@ def test_minimum_duration_masks_early_stop_until_required_frames() -> None:
 
     assert result.codes.shape == (1, 2, 4)
     assert result.stopped_on_audio_end
+
+
+def test_progress_without_a_reference_reports_an_empty_prefix() -> None:
+    language_model, decoder = build_tiny_models()
+    events: list[GenerationProgress] = []
+
+    generate_autoregressive(
+        language_model,
+        decoder,
+        tiny_prompt(),
+        AutoregressiveConfig(audio_duration=3 / 25, buffer_flush_interval=1),
+        sampler=_argmax_sampler,
+        progress=events.append,
+    )
+
+    assert [
+        (
+            event.completed_frames,
+            event.maximum_frames,
+            event.prefilled_frames,
+            event.prefix_frames,
+        )
+        for event in events
+    ] == [(1, 3, 0, 0), (2, 3, 0, 0), (3, 3, 0, 0)]
+
+
+def test_generation_progress_defaults_the_prefill_fields_to_zero() -> None:
+    progress = GenerationProgress(4, 10)
+
+    assert progress == GenerationProgress(
+        completed_frames=4,
+        maximum_frames=10,
+        prefilled_frames=0,
+        prefix_frames=0,
+    )
 
 
 def test_restricted_semantic_head_matches_full_projection() -> None:
@@ -177,6 +213,32 @@ def test_reference_plan_carries_the_configured_controls() -> None:
     assert plan.codes == codes
     assert plan.mode is ReferenceMode.GUIDANCE
     assert plan.interval == 2
+
+
+def test_prefix_frames_is_zero_without_a_reference() -> None:
+    config = AutoregressiveConfig(reference_mode=ReferenceMode.CONTINUE)
+
+    assert config.prefix_frames == 0
+
+
+@pytest.mark.parametrize(
+    ("mode", "prefix_frames"),
+    [
+        (ReferenceMode.GUIDANCE, 0),
+        (ReferenceMode.COVER, 0),
+        (ReferenceMode.CONTINUE, 2),
+    ],
+)
+def test_prefix_frames_counts_only_a_continue_reference(
+    mode: ReferenceMode,
+    prefix_frames: int,
+) -> None:
+    config = AutoregressiveConfig(
+        reference_codes=ReferenceCodes.from_semantic_codes((3, 4)),
+        reference_mode=mode,
+    )
+
+    assert config.prefix_frames == prefix_frames
 
 
 def test_autoregressive_config_rejects_an_interval_outside_guidance() -> None:

@@ -71,3 +71,6 @@ All notable project changes are documented here.
   far. Generated-frame reports have `prefilled_frames` equal to `prefix_frames`. A
   caller that reads only `completed_frames` receives one report at zero per prefix
   frame.
+- Report a CONTINUE prefill at zero frames before the autoregressive stage
+  loads, so a caller can show the stage during the model load and prompt
+  evaluation.
